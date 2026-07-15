@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import type { KiloClient } from "@kilocode/sdk/v2/client"
-import { abortSession, parseQueued } from "../../src/kilo-provider/abort"
+import { abortSession, SessionAbort } from "../../src/kilo-provider/abort"
 
 function client(calls: unknown[], fail = false) {
   return {
@@ -10,36 +10,17 @@ function client(calls: unknown[], fail = false) {
         if (fail) throw new Error("abort failed")
         return { data: true }
       },
-      deleteMessage: async (params: unknown, opts: unknown) => {
-        calls.push({ type: "delete", params, opts })
-        return { data: true }
-      },
     },
   } as unknown as KiloClient
 }
 
-describe("parseQueued", () => {
-  it("keeps only string queued message ids", () => {
-    expect(parseQueued(["message_1", 2, null, "message_2", {}])).toEqual(["message_1", "message_2"])
-  })
-
-  it("returns empty ids for invalid payloads", () => {
-    expect(parseQueued(undefined)).toEqual([])
-    expect(parseQueued({ queuedMessageIDs: ["message_1"] })).toEqual([])
-  })
-})
-
-describe("abortSession", () => {
-  it("aborts before removing queued follow-up messages", async () => {
+describe("SessionAbort", () => {
+  it("stops the active owner and current mapped directory", async () => {
     const calls: unknown[] = []
+    const aborts = new SessionAbort()
+    aborts.observe("session_1", "busy", "/repo")
 
-    await abortSession({
-      client: client(calls),
-      sessionID: "session_1",
-      dir: "/repo",
-      queuedMessageIDs: ["message_2", "message_3", "message_2"],
-    })
-
+    expect(await aborts.stop(client(calls), "session_1", "/repo/worktree")).toBe(true)
     expect(calls).toEqual([
       {
         type: "abort",
@@ -47,29 +28,60 @@ describe("abortSession", () => {
         opts: { throwOnError: true },
       },
       {
-        type: "delete",
-        params: { sessionID: "session_1", messageID: "message_2", directory: "/repo" },
-        opts: { throwOnError: true },
-      },
-      {
-        type: "delete",
-        params: { sessionID: "session_1", messageID: "message_3", directory: "/repo" },
+        type: "abort",
+        params: { sessionID: "session_1", directory: "/repo/worktree" },
         opts: { throwOnError: true },
       },
     ])
   })
 
-  it("does not remove queued messages when abort fails", async () => {
+  it("forgets an owner when its instance becomes idle", async () => {
+    const calls: unknown[] = []
+    const aborts = new SessionAbort()
+    aborts.observe("session_1", "busy", "/repo")
+    aborts.observe("session_1", "idle", "/repo")
+
+    expect(await aborts.stop(client(calls), "session_1", "/repo/worktree")).toBe(false)
+    expect(calls).toEqual([
+      {
+        type: "abort",
+        params: { sessionID: "session_1", directory: "/repo/worktree" },
+        opts: { throwOnError: true },
+      },
+    ])
+  })
+
+  it("deduplicates equivalent directory paths", async () => {
+    const calls: unknown[] = []
+    const aborts = new SessionAbort()
+    aborts.observe("session_1", "busy", "/repo/worktree")
+
+    expect(await aborts.stop(client(calls), "session_1", "/repo/worktree/.")).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
+})
+
+describe("abortSession", () => {
+  it("calls session.abort with the session id and directory", async () => {
     const calls: unknown[] = []
 
-    await expect(
-      abortSession({
-        client: client(calls, true),
-        sessionID: "session_1",
-        dir: "/repo",
-        queuedMessageIDs: ["message_2"],
-      }),
-    ).rejects.toThrow("abort failed")
+    await abortSession({ client: client(calls), sessionID: "session_1", dir: "/repo" })
+
+    expect(calls).toEqual([
+      {
+        type: "abort",
+        params: { sessionID: "session_1", directory: "/repo" },
+        opts: { throwOnError: true },
+      },
+    ])
+  })
+
+  it("rejects when the abort request fails", async () => {
+    const calls: unknown[] = []
+
+    await expect(abortSession({ client: client(calls, true), sessionID: "session_1", dir: "/repo" })).rejects.toThrow(
+      "abort failed",
+    )
 
     expect(calls).toEqual([
       {

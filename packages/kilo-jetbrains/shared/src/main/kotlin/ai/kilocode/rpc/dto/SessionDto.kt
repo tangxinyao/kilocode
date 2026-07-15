@@ -12,6 +12,15 @@ data class SessionDto(
     val version: String,
     val time: SessionTimeDto,
     val summary: SessionSummaryDto? = null,
+    val revert: SessionRevertDto? = null,
+)
+
+@Serializable
+data class SessionRevertDto(
+    val messageID: String,
+    val partID: String? = null,
+    val snapshot: String? = null,
+    val diff: String? = null,
 )
 
 @Serializable
@@ -32,6 +41,9 @@ data class SessionSummaryDto(
 data class SessionStatusDto(
     val type: String,
     val message: String? = null,
+    val attempt: Int? = null,
+    val next: Long? = null,
+    val requestID: String? = null,
 )
 
 @Serializable

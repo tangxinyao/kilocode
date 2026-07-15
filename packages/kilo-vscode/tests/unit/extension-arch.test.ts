@@ -16,6 +16,25 @@ const PKG_JSON_FILE = path.join(ROOT, "package.json")
 const SRC_DIR = path.join(ROOT, "src")
 const EXTENSION_FILE = path.join(ROOT, "src/extension.ts")
 const KILO_PROVIDER_FILE = path.join(ROOT, "src/KiloProvider.ts")
+const VSCODE_HOST_FILE = path.join(ROOT, "src/agent-manager/vscode-host.ts")
+
+function sliceBlock(source: string, start: number): string {
+  const open = source.indexOf("{", start)
+  expect(open, "block opening brace must exist").toBeGreaterThan(-1)
+
+  const state = { depth: 0, end: -1 }
+  Array.from(source.slice(open)).some((ch, i) => {
+    if (ch === "{") state.depth++
+    if (ch === "}") state.depth--
+    if (state.depth !== 0) return false
+    state.end = open + i
+    return true
+  })
+
+  if (state.end > -1) return source.slice(start, state.end + 1)
+
+  throw new Error("block closing brace not found")
+}
 
 function readSrcFiles(dir: string): string {
   const parts: string[] = []
@@ -85,6 +104,28 @@ describe("Extension — package.json command sync", () => {
       `Commands without "kilo-code.new." prefix — use the namespaced form:\n` + bad.map((b) => `  - ${b}`).join("\n"),
     ).toEqual([])
   })
+
+  it("scopes Agent Manager search to the panel and leaves the integrated terminal alone", () => {
+    const binding = pkg.contributes?.keybindings?.find(
+      (item: { command: string }) => item.command === "kilo-code.new.agentManager.search",
+    )
+    expect(binding).toMatchObject({
+      key: "ctrl+f",
+      mac: "cmd+f",
+      when: "activeWebviewPanelId == 'kilo-code.new.AgentManagerPanel' && !terminalFocus",
+    })
+  })
+
+  it("scopes the open PR shortcut to Agent Manager", () => {
+    const binding = pkg.contributes?.keybindings?.find(
+      (item: { command: string }) => item.command === "kilo-code.new.agentManager.openPR",
+    )
+    expect(binding).toMatchObject({
+      key: "ctrl+shift+r",
+      mac: "cmd+shift+r",
+      when: "activeWebviewPanelId == 'kilo-code.new.AgentManagerPanel'",
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -141,7 +182,7 @@ describe("Extension — KiloProvider handler wiring", () => {
   it("openKiloInNewTab wires setContinueInWorktreeHandler before resolveWebviewPanel", () => {
     const fn = ext.indexOf("function openKiloInNewTab")
     expect(fn, "openKiloInNewTab must exist").toBeGreaterThan(-1)
-    const body = ext.slice(fn, fn + 1500)
+    const body = sliceBlock(ext, fn)
     const handler = body.indexOf("setContinueInWorktreeHandler")
     const resolve = body.indexOf("resolveWebviewPanel")
     expect(handler, "setContinueInWorktreeHandler must be called").toBeGreaterThan(-1)
@@ -152,7 +193,7 @@ describe("Extension — KiloProvider handler wiring", () => {
   it("TabPanel deserializer wires setContinueInWorktreeHandler before resolveWebviewPanel", () => {
     const serializer = ext.indexOf('"kilo-code.new.TabPanel"')
     expect(serializer, "TabPanel serializer must exist").toBeGreaterThan(-1)
-    const body = ext.slice(serializer, serializer + 800)
+    const body = sliceBlock(ext, serializer)
     const handler = body.indexOf("setContinueInWorktreeHandler")
     const resolve = body.indexOf("resolveWebviewPanel")
     expect(handler, "setContinueInWorktreeHandler must be called in deserializer").toBeGreaterThan(-1)
@@ -168,6 +209,35 @@ describe("Extension — KiloProvider handler wiring", () => {
 // must send an error back to the webview so the spinner resets. Previously
 // it silently no-op'd, leaving the UI stuck.
 // ---------------------------------------------------------------------------
+
+describe("Extension — Agent Manager remote wiring", () => {
+  const ext = fs.readFileSync(EXTENSION_FILE, "utf-8")
+  const host = fs.readFileSync(VSCODE_HOST_FILE, "utf-8")
+
+  it("passes the shared remote service to Agent Manager", () => {
+    expect(ext).toContain("new VscodeHost(context.extensionUri, connectionService, context, remoteService)")
+  })
+
+  it("wires the remote service before attaching the Agent Manager webview", () => {
+    const remote = host.indexOf("provider.setRemoteService(this.remoteService)")
+    const attach = host.indexOf("provider.attachToWebview")
+    expect(remote).toBeGreaterThan(-1)
+    expect(attach).toBeGreaterThan(-1)
+    expect(remote).toBeLessThan(attach)
+  })
+})
+
+describe("KiloProvider — remote focus lifecycle", () => {
+  const provider = fs.readFileSync(KILO_PROVIDER_FILE, "utf-8")
+
+  it("registers newly created sessions and uses the synchronous session ID", () => {
+    const create = sliceBlock(provider, provider.indexOf("private async handleCreateSession"))
+    const resolve = sliceBlock(provider, provider.indexOf("private async resolveSession"))
+    expect(create).toContain("this.focusSession(session.id)")
+    expect(resolve).toContain("this.focusSession(session.id)")
+    expect(provider).toContain("this.focusSession(webviewView.visible ? this.contextSessionID : undefined)")
+  })
+})
 
 describe("KiloProvider — continueInWorktree error fallback", () => {
   const helper = fs.readFileSync(path.join(ROOT, "src/kilo-provider/continue-worktree.ts"), "utf-8")

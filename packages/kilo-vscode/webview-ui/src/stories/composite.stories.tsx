@@ -8,7 +8,7 @@
  */
 
 import type { Meta, StoryObj } from "storybook-solidjs-vite"
-import type { AssistantMessage as SDKAssistantMessage, TextPart, ToolPart } from "@kilocode/sdk/v2"
+import type { AssistantMessage as SDKAssistantMessage, ReasoningPart, TextPart, ToolPart } from "@kilocode/sdk/v2"
 import { StoryProviders, defaultMockData, mockSessionValue } from "./StoryProviders"
 import { AssistantMessage } from "../components/chat/AssistantMessage"
 import { VscodeSessionTurn } from "../components/chat/VscodeSessionTurn"
@@ -43,6 +43,15 @@ const baseAssistantMessage: SDKAssistantMessage = {
   path: { cwd: "/project", root: "/project" },
   cost: 0.0023,
   tokens: { total: 512, input: 256, output: 256, reasoning: 0, cache: { read: 0, write: 0 } },
+}
+
+const titleOnlyReasoning: ReasoningPart = {
+  id: "part-reasoning-title-only",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "reasoning",
+  text: "**Assessing search behavior**\n\n<!-- -->",
+  time: { start: now - 7000, end: now - 6500 },
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +156,104 @@ const bashPending = {
   },
 }
 
+const backgroundStartPending: ToolPart = {
+  id: "part-background-start-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-background-start-001",
+  tool: "background_process",
+  state: {
+    status: "running",
+    input: {
+      action: "start",
+      command: "bun run dev --host 127.0.0.1",
+      description: "Dev server",
+      workdir: "/project/web",
+      ready: { port: 5173, pattern: "ready in", timeout: 30000 },
+    },
+    metadata: {},
+    time: { start: now - 2500 },
+  },
+}
+
+const backgroundStartCompleted: ToolPart = {
+  id: "part-background-start-002",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-background-start-002",
+  tool: "background_process",
+  state: {
+    status: "completed",
+    input: {
+      action: "start",
+      command: "bun run dev --host 127.0.0.1",
+      description: "Dev server",
+      workdir: "/project/web",
+      ready: { port: 5173, pattern: "ready in", timeout: 30000 },
+    },
+    output: [
+      "id: bgp_01hv8devserver",
+      "status: ready",
+      "pid: 42817",
+      "cwd: /project/web",
+      "command: bun run dev --host 127.0.0.1",
+      "last_output: VITE v5.4.0 ready in 318 ms",
+    ].join("\n"),
+    title: "Started background process",
+    metadata: { processID: "bgp?", status: "ready" },
+    time: { start: now - 2400, end: now - 1800 },
+  },
+}
+
+const backgroundLogsCompleted: ToolPart = {
+  id: "part-background-logs-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-background-logs-001",
+  tool: "background_process",
+  state: {
+    status: "completed",
+    input: { action: "logs", id: "bgp_01hv8devserver" },
+    output: ["VITE v5.4.0 ready in 318 ms", "Local: http://127.0.0.1:5173/"].join("\n"),
+    title: "Logs: Dev server",
+    metadata: { processID: "bgp_01hv8devserver", status: "ready" },
+    time: { start: now - 1800, end: now - 1200 },
+  },
+}
+
+const githubApiError: ToolPart = {
+  id: "part-github-error-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-github-error-001",
+  tool: "github-pr-search",
+  state: {
+    status: "error",
+    input: { query: "status-inline-self-test" },
+    error: "GitHub API error: 401 Unauthorized",
+    time: { start: now - 3000, end: now - 2500 },
+  },
+}
+
+const fileError: ToolPart = {
+  id: "part-file-error-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-file-error-001",
+  tool: "edit",
+  state: {
+    status: "error",
+    input: { filePath: "src/missing-file.tsx" },
+    error: "ENOENT: no such file or directory 'src/missing-file.tsx'",
+    time: { start: now - 2000, end: now - 1500 },
+  },
+}
+
 const textPart: TextPart = {
   id: "part-text-001",
   sessionID: SESSION_ID,
@@ -173,9 +280,13 @@ const bashPermission: PermissionRequest = {
   id: "perm-bash-001",
   sessionID: SESSION_ID,
   toolName: "bash",
-  patterns: ["bun test"],
+  patterns: ['if [[ -f ".env" ]]; then source ".env"; fi\nbun test'],
   always: ["bun *"],
-  args: { command: "bun test", rules: ["bun *", "bun test"] },
+  args: {
+    command: 'if [[ -f ".env" ]]; then source ".env"; fi\nbun test',
+    description: "Load environment and run tests",
+    rules: ["bun *", "bun test"],
+  },
   tool: { messageID: ASST_MSG_ID, callID: "call-bash-001" },
 }
 
@@ -287,6 +398,83 @@ const todoWriteCompleted: ToolPart = {
         { id: "1", content: "Create a haiku about Jan", status: "completed" },
         { id: "2", content: "Create a poem about Henk", status: "in_progress" },
       ],
+    },
+    time: { start: now - 3000, end: now - 2800 },
+  },
+}
+
+const docsTodos = [
+  {
+    id: "1",
+    content: "Project setup and core architecture (package.json, tsconfig, documentation, type definitions)",
+    status: "completed",
+  },
+  {
+    id: "2",
+    content: "Configuration system (scraper config, targets.json, validation utilities)",
+    status: "completed",
+  },
+  {
+    id: "3",
+    content: "Core scraping engine (browser manager, orchestrator, selector engine, content extractor)",
+    status: "completed",
+  },
+  {
+    id: "4",
+    content: "Utility modules (DOM utils, retry logic, URL handling, validation)",
+    status: "completed",
+  },
+  { id: "5", content: "CLI interface implementation", status: "in_progress" },
+  { id: "6", content: "Storage layer implementation (database and file storage)", status: "pending" },
+  { id: "7", content: "Chart extractors for specific chart types", status: "pending" },
+  { id: "8", content: "Logging and error handling systems", status: "pending" },
+  { id: "9", content: "Test suites (unit and integration tests)", status: "pending" },
+  { id: "10", content: "Main entry point and final integration", status: "pending" },
+]
+
+const todoWriteDocsOverview: ToolPart = {
+  id: "part-todo-docs-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-todo-docs-001",
+  tool: "todowrite",
+  state: {
+    status: "completed",
+    input: { todos: docsTodos },
+    output: "Updated 10 todos",
+    title: "Todo List Updated",
+    metadata: { todos: docsTodos },
+    time: { start: now - 3000, end: now - 2800 },
+  },
+}
+
+const compactTodos = docsTodos.map((todo, index) =>
+  index < 5 ? { ...todo, status: "completed" } : { ...todo, status: index === 5 ? "pending" : todo.status },
+)
+const compactViewTodos = compactTodos.slice(3, 6).map((todo, index) => ({ ...todo, changed: index === 1 }))
+
+const todoWriteCompactUpdate: ToolPart = {
+  id: "part-todo-compact-001",
+  sessionID: SESSION_ID,
+  messageID: ASST_MSG_ID,
+  type: "tool",
+  callID: "call-todo-compact-001",
+  tool: "todowrite",
+  state: {
+    status: "completed",
+    input: { todos: compactTodos },
+    output: "Updated 10 todos",
+    title: "Todo List Updated",
+    metadata: {
+      todos: compactTodos,
+      view: {
+        mode: "compact",
+        todos: compactViewTodos,
+        hiddenBefore: 3,
+        hiddenAfter: 4,
+        changed: 1,
+      },
     },
     time: { start: now - 3000, end: now - 2800 },
   },
@@ -467,6 +655,49 @@ export const ToolCards: Story = {
   },
 }
 
+export const TimelineHighlightedTool: Story = {
+  name: "Task Timeline — highlighted tool",
+  render: () => {
+    const data = dataWith([readCompleted])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <div class="vscode-session-turn" data-row="assistant">
+          <div class="vscode-session-turn-assistant">
+            <AssistantMessage
+              message={baseAssistantMessage}
+              highlight={() => ({ msgId: ASST_MSG_ID, partId: readCompleted.id })}
+            />
+          </div>
+        </div>
+      </StoryProviders>
+    )
+  },
+}
+
+export const TitleOnlyReasoning: Story = {
+  name: "Reasoning - title only",
+  render: () => {
+    const data = dataWith([titleOnlyReasoning, textPart])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
+export const BackgroundProcessToolCards: Story = {
+  name: "Tool Cards — background process",
+  render: () => {
+    const data = dataWith([backgroundStartPending, backgroundStartCompleted, backgroundLogsCompleted])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID} status="busy">
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
 // ---------------------------------------------------------------------------
 // 5. Chat idle — prompt input placeholder
 // ---------------------------------------------------------------------------
@@ -609,6 +840,30 @@ export const TodoWriteCompleted: Story = {
   },
 }
 
+export const TodoWriteDocsOverview: Story = {
+  name: "TodoWrite — docs overview",
+  render: () => {
+    const data = dataWith([todoWriteDocsOverview])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
+export const TodoWriteCompactUpdate: Story = {
+  name: "TodoWrite - Compact update",
+  render: () => {
+    const data = dataWith([todoWriteCompactUpdate])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
 // ---------------------------------------------------------------------------
 // 12. Permission dock — edit tool with file patterns
 // ---------------------------------------------------------------------------
@@ -619,8 +874,46 @@ const editPermission: PermissionRequest = {
   toolName: "edit",
   patterns: ["src/components/App.tsx", "src/utils/helpers.ts"],
   always: ["*"],
-  args: {},
+  args: {
+    filediff: {
+      file: "src/components/App.tsx",
+      patch:
+        '===================================================================\n--- src/components/App.tsx\n+++ src/components/App.tsx\n@@ -1,3 +1,4 @@\n import { Button } from "@kilocode/kilo-ui/button"\n+import { Card } from "@kilocode/kilo-ui/card"\n \n export function App() {\n',
+      additions: 1,
+      deletions: 0,
+    },
+  },
   tool: { messageID: ASST_MSG_ID, callID: "call-edit-001" },
+}
+
+const applyPatchPermission: PermissionRequest = {
+  id: "perm-patch-001",
+  sessionID: SESSION_ID,
+  toolName: "edit",
+  patterns: ["src/components/App.tsx", "src/utils/helpers.ts"],
+  always: ["*"],
+  args: {
+    filepath: "src/components/App.tsx, src/utils/helpers.ts",
+    files: [
+      {
+        relativePath: "src/components/App.tsx",
+        type: "update",
+        patch:
+          '===================================================================\n--- src/components/App.tsx\n+++ src/components/App.tsx\n@@ -1,3 +1,4 @@\n import { Button } from "@kilocode/kilo-ui/button"\n+import { Card } from "@kilocode/kilo-ui/card"\n \n export function App() {\n',
+        additions: 1,
+        deletions: 0,
+      },
+      {
+        relativePath: "src/utils/helpers.ts",
+        type: "update",
+        patch:
+          "===================================================================\n--- src/utils/helpers.ts\n+++ src/utils/helpers.ts\n@@ -1,3 +1,3 @@\n export function label(value: string) {\n-  return value\n+  return value.trim()\n }\n",
+        additions: 1,
+        deletions: 1,
+      },
+    ],
+  },
+  tool: { messageID: ASST_MSG_ID, callID: "call-patch-001" },
 }
 
 export const PermissionDockEdit: Story = {
@@ -635,6 +928,26 @@ export const PermissionDockEdit: Story = {
       <StoryProviders permissions={perms} sessionID={SESSION_ID} status="busy" noPadding>
         <SessionContext.Provider value={session as any}>
           <div style={{ width: "100%", height: "350px", display: "flex", "flex-direction": "column" }}>
+            <ChatView />
+          </div>
+        </SessionContext.Provider>
+      </StoryProviders>
+    )
+  },
+}
+
+export const PermissionDockApplyPatch: Story = {
+  name: "Permission Dock - apply patch",
+  render: () => {
+    const perms = [applyPatchPermission]
+    const session = {
+      ...mockSessionValue({ id: SESSION_ID, status: "busy", permissions: perms }),
+      messages: () => [{ id: "msg-001" }] as any[],
+    }
+    return (
+      <StoryProviders permissions={perms} sessionID={SESSION_ID} status="busy" noPadding>
+        <SessionContext.Provider value={session as any}>
+          <div style={{ width: "100%", height: "420px", display: "flex", "flex-direction": "column" }}>
             <ChatView />
           </div>
         </SessionContext.Provider>
@@ -685,9 +998,9 @@ const externalDirPermission: PermissionRequest = {
   id: "perm-extdir-001",
   sessionID: SESSION_ID,
   toolName: "external_directory",
-  patterns: ["/home/user/other-project/*"],
-  always: ["/home/user/other-project/*"],
-  args: { filepath: "/home/user/other-project/config.json" },
+  patterns: ["/Users/developer/projects/kilo-bench/dashboard/app/routes/*"],
+  always: ["/Users/developer/projects/kilo-bench/dashboard/app/routes/*"],
+  args: { filepath: "/Users/developer/projects/kilo-bench/dashboard/app/routes/index.tsx" },
   tool: { messageID: ASST_MSG_ID, callID: "call-extdir-001" },
 }
 
@@ -950,6 +1263,30 @@ const mcpShort: ToolPart = {
   },
 }
 
+export const ToolErrors: Story = {
+  name: "Tool Errors — HTTP and filesystem",
+  render: () => {
+    const data = dataWith([githubApiError, fileError])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
+export const ToolErrors200: Story = {
+  name: "Tool Errors — HTTP and filesystem (200px)",
+  render: () => {
+    const data = dataWith([githubApiError, fileError])
+    return (
+      <StoryProviders data={data} sessionID={SESSION_ID}>
+        <AssistantMessage message={baseAssistantMessage} />
+      </StoryProviders>
+    )
+  },
+}
+
 export const McpToolCards: Story = {
   name: "MCP Tool Cards — collapsed",
   render: () => {
@@ -981,7 +1318,7 @@ export const McpToolExpanded: Story = {
 }
 
 // ---------------------------------------------------------------------------
-// 19. Diff summary — "Modified N files" collapsed header
+// 19. Diff summary — "Modified N files" banner (opens changes view on click)
 // ---------------------------------------------------------------------------
 
 const USER_MSG_ID = "user-msg-diff-001"
@@ -993,7 +1330,7 @@ const mockDiffs = [
 ]
 
 export const DiffSummaryCollapsed: Story = {
-  name: "Diff Summary — Modified N files (collapsed)",
+  name: "Diff Summary — Modified N files",
   render: () => {
     const data = {
       ...defaultMockData,
@@ -1030,6 +1367,7 @@ export const DiffSummaryCollapsed: Story = {
       profileData: () => null,
       deviceAuth: () => ({ status: "idle" as const }),
       startLogin: () => {},
+      goToLogin: () => {},
       vscodeLanguage: () => "en",
       languageOverride: () => undefined,
       workspaceDirectory: () => "/project",
@@ -1040,7 +1378,13 @@ export const DiffSummaryCollapsed: Story = {
         <ServerContext.Provider value={server as any}>
           <SessionContext.Provider value={session as any}>
             <div style={{ width: "380px", padding: "12px" }}>
-              <VscodeSessionTurn sessionID={SESSION_ID} messageID={USER_MSG_ID} />
+              <VscodeSessionTurn
+                turn={{
+                  id: USER_MSG_ID,
+                  user: data.message[SESSION_ID][0] as any,
+                  assistant: [data.message[SESSION_ID][1] as any],
+                }}
+              />
             </div>
           </SessionContext.Provider>
         </ServerContext.Provider>

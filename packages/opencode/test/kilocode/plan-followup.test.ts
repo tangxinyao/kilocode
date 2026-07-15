@@ -1,43 +1,100 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import { Effect } from "effect"
+import { Telemetry } from "@kilocode/kilo-telemetry"
+import { Global } from "@opencode-ai/core/global"
+import * as Log from "@opencode-ai/core/util/log"
 import { Agent } from "../../src/agent/agent"
-import { Bus } from "../../src/bus"
+import { GlobalBus } from "../../src/bus/global"
 import { TuiEvent } from "../../src/cli/cmd/tui/event"
 import { Identifier } from "../../src/id/id"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
-import { ModelID, ProviderID } from "../../src/provider/schema"
-import { formatTodos, generateHandover, PlanFollowup } from "../../src/kilocode/plan-followup"
-import { Instance } from "../../src/project/instance"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { EventV2 } from "@opencode-ai/core/event"
+import { formatTodos, generateHandover, PlanFollowup, PlanFollowupRuntime } from "../../src/kilocode/plan-followup"
+import { Instance } from "../../src/kilocode/instance"
 import { Provider } from "../../src/provider/provider"
 import { Question } from "../../src/question"
-import { Session } from "../../src/session"
-import { LLM } from "../../src/session/llm"
+import { Session } from "../../src/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
-import { SessionPrompt } from "../../src/session/prompt"
+import { AppRuntime } from "../../src/effect/app-runtime"
+import { makeRuntime } from "../../src/effect/run-service"
+import { SessionStatus } from "../../src/session/status"
 import { Todo } from "../../src/session/todo"
-import { Global } from "../../src/global"
-import { Log } from "../../src/util/log"
 import path from "path"
 import fs from "fs/promises"
-import { tmpdir } from "../fixture/fixture"
+import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
 Log.init({ print: false })
 process.env.KILO_CLIENT = "cli"
 
+function subscribe<D extends EventV2.Definition>(
+  definition: D,
+  callback: (event: { properties: EventV2.Data<D> }) => void,
+) {
+  const directory = Instance.directory
+  const handler = (event: { directory?: string; payload?: { type?: string; properties?: unknown } }) => {
+    if (event.directory !== directory || event.payload?.type !== definition.type) return
+    callback({ properties: event.payload.properties as EventV2.Data<D> })
+  }
+  GlobalBus.on("event", handler)
+  return () => GlobalBus.off("event", handler)
+}
+
+const runtime = makeRuntime(Question.Service, Question.defaultLayer)
+const question = {
+  ask(input: Parameters<Question.Interface["ask"]>[0]) {
+    return runtime.runPromise((svc) => svc.ask(input))
+  },
+  list() {
+    return runtime.runPromise((svc) => svc.list())
+  },
+  reply(input: Parameters<Question.Interface["reply"]>[0]) {
+    return runtime.runPromise((svc) => svc.reply(input))
+  },
+  reject(requestID: Parameters<Question.Interface["reject"]>[0]) {
+    return runtime.runPromise((svc) => svc.reject(requestID))
+  },
+}
+
+const todo = {
+  update(input: Parameters<Todo.Interface["update"]>[0]) {
+    return AppRuntime.runPromise(Todo.Service.use((svc) => svc.update(input)))
+  },
+  get(sessionID: SessionID) {
+    return AppRuntime.runPromise(Todo.Service.use((svc) => svc.get(sessionID)))
+  },
+}
+
+const session = makeRuntime(Session.Service, Session.defaultLayer)
+const store = {
+  create: (input?: Parameters<Session.Interface["create"]>[0]) =>
+    session.runPromise((svc) => svc.create(input)),
+  get: (id: SessionID) =>
+    session.runPromise((svc) => svc.get(id)),
+  messages: (input: Parameters<Session.Interface["messages"]>[0]) =>
+    session.runPromise((svc) => svc.messages(input)),
+  updateMessage: <T extends MessageV2.Info>(msg: T) =>
+    session.runPromise((svc) => svc.updateMessage(msg)),
+  updatePart: <T extends MessageV2.Part>(part: T) =>
+    session.runPromise((svc) => svc.updatePart(part)),
+}
+
 const model = {
-  providerID: ProviderID.make("openai"),
-  modelID: ModelID.make("gpt-4"),
+  providerID: ProviderV2.ID.make("openai"),
+  modelID: ModelV2.ID.make("gpt-4"),
 }
 
 const saved = {
-  providerID: ProviderID.make("openai"),
-  modelID: ModelID.make("gpt-5"),
+  providerID: ProviderV2.ID.make("openai"),
+  modelID: ModelV2.ID.make("gpt-5"),
 }
 
 const savedVar = "high"
 
 const config = {
-  providerID: ProviderID.make("openai"),
-  modelID: ModelID.make("gpt-4.1"),
+  providerID: ProviderV2.ID.make("openai"),
+  modelID: ModelV2.ID.make("gpt-4.1"),
 }
 
 const configVar = "max"
@@ -49,7 +106,7 @@ const savedKey = `${saved.providerID}/${saved.modelID}`
 async function withInstance(fn: () => Promise<void>) {
   await using tmp = await tmpdir({ git: true })
   await fs.rm(statePath, { force: true }).catch(() => {})
-  await Instance.provide({
+  await provideTestInstance({
     directory: tmp.path,
     fn: async () => {
       await fs.rm(statePath, { force: true }).catch(() => {})
@@ -67,8 +124,8 @@ async function seed(input: {
   variant?: string
   tools?: Array<{ tool: string; input: Record<string, unknown>; output: string }>
 }) {
-  const session = await Session.create({})
-  const user = await Session.updateMessage({
+  const session = await store.create({})
+  const user = await store.updateMessage({
     id: MessageID.ascending(),
     role: "user",
     sessionID: session.id,
@@ -78,7 +135,7 @@ async function seed(input: {
     agent: "plan",
     model: input.variant ? { ...model, variant: input.variant } : model,
   })
-  await Session.updatePart({
+  await store.updatePart({
     id: PartID.ascending(),
     messageID: user.id,
     sessionID: session.id,
@@ -115,8 +172,8 @@ async function seed(input: {
     },
     finish: "end_turn",
   }
-  await Session.updateMessage(assistant)
-  await Session.updatePart({
+  await store.updateMessage(assistant)
+  await store.updatePart({
     id: PartID.ascending(),
     messageID: assistant.id,
     sessionID: session.id,
@@ -125,7 +182,7 @@ async function seed(input: {
   })
 
   for (const t of input.tools ?? []) {
-    await Session.updatePart({
+    await store.updatePart({
       id: PartID.ascending(),
       messageID: assistant.id,
       sessionID: session.id,
@@ -143,7 +200,7 @@ async function seed(input: {
     } satisfies MessageV2.ToolPart)
   }
 
-  const messages = await Session.messages({ sessionID: session.id })
+  const messages = await store.messages({ sessionID: session.id })
   return {
     sessionID: session.id,
     messages,
@@ -151,7 +208,7 @@ async function seed(input: {
 }
 
 async function latestUser(sessionID: SessionID) {
-  const messages = await Session.messages({ sessionID })
+  const messages = await store.messages({ sessionID })
   return messages
     .slice()
     .reverse()
@@ -159,12 +216,12 @@ async function latestUser(sessionID: SessionID) {
 }
 
 async function sessions() {
-  return Array.fromAsync(Session.list())
+  return session.runPromise((svc) => svc.list())
 }
 
 async function waitQuestion(sessionID: string) {
   for (let i = 0; i < 50; i++) {
-    const list = await Question.list()
+    const list = await question.list()
     const item = list.find((q) => q.sessionID === sessionID)
     if (item) return item
     await Bun.sleep(10)
@@ -208,21 +265,19 @@ const savedConfigFull = full(saved, [configVar, "low"])
 const configFull = full(config, [configVar, "low"])
 
 function mockHandoverDeps(text: string, opts?: { agent?: Agent.Info | null }) {
-  const agentSpy = spyOn(Agent, "get").mockResolvedValue(
+  const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(
     (opts?.agent === null ? undefined : (opts?.agent ?? fakeAgent)) as any,
   )
-  const modelSpy = spyOn(Provider, "getModel").mockResolvedValue(fakeModel)
-  const llmSpy = spyOn(LLM, "stream").mockResolvedValue({
-    text: Promise.resolve(text),
-  } as any)
+  const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+  const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockResolvedValue(text)
   return {
     agentSpy,
     modelSpy,
-    llmSpy,
+    handoverSpy,
     [Symbol.dispose]() {
       agentSpy.mockRestore()
       modelSpy.mockRestore()
-      llmSpy.mockRestore()
+      handoverSpy.mockRestore()
     },
   }
 }
@@ -232,6 +287,7 @@ describe("plan follow-up", () => {
     withInstance(async () => {
       const seeded = await seed({ text: "1. Step one\n2. Step two" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -240,14 +296,153 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reject(item.id)
+      await question.reject(item.id)
 
+      await expect(pending).resolves.toBe("break")
+    }))
+
+  test("ask - emits a single-select question with the canonical answers and custom enabled on CLI", () =>
+    withInstance(async () => {
+      const seeded = await seed({ text: "1. Build" })
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      const q = item.questions[0]
+      expect(q).toBeDefined()
+      if (!q) return
+
+      // On CLI the main prompt input is hidden while a blocking question is active, so
+      // "Type your own answer" must remain available — i.e. custom must not be false.
+      expect(q.custom).not.toBe(false)
+      expect(q.multiple).not.toBe(true)
+      expect(q.options.map((item) => item.label)).toEqual([
+        PlanFollowup.ANSWER_NEW_SESSION,
+        PlanFollowup.ANSWER_CONTINUE,
+        PlanFollowup.ANSWER_KEEP_REFINING,
+      ])
+
+      await question.reject(item.id)
+      await expect(pending).resolves.toBe("break")
+    }))
+
+  test("ask - follow-up options carry modes so the picker updates immediately", () =>
+    withInstance(async () => {
+      const seeded = await seed({ text: "1. Build" })
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      const q = item.questions[0]
+      expect(q).toBeDefined()
+      if (!q) return
+
+      const continueOpt = q.options.find((o) => o.label === PlanFollowup.ANSWER_CONTINUE)
+      expect(continueOpt?.mode).toBe("code")
+
+      const refineOpt = q.options.find((o) => o.label === PlanFollowup.ANSWER_KEEP_REFINING)
+      expect(refineOpt?.mode).toBe("plan")
+
+      // Start new session should not carry a mode (it opens a new session — the
+      // current picker is irrelevant once the session switches).
+      const newOpt = q.options.find((o) => o.label === PlanFollowup.ANSWER_NEW_SESSION)
+      expect(newOpt?.mode).toBeUndefined()
+
+      await question.reject(item.id)
+      await expect(pending).resolves.toBe("break")
+    }))
+
+  test("ask - hides custom answer row on VS Code where the main prompt input handles typed replies", () =>
+    withInstance(async () => {
+      const prev = process.env.KILO_CLIENT
+      try {
+        process.env.KILO_CLIENT = "vscode"
+        const seeded = await seed({ text: "1. Build" })
+        const pending = PlanFollowup.ask({
+          question,
+          sessionID: seeded.sessionID,
+          messages: seeded.messages,
+          abort: AbortSignal.any([]),
+        })
+
+        const item = await waitQuestion(seeded.sessionID)
+        expect(item).toBeDefined()
+        if (!item) return
+        const q = item.questions[0]
+        expect(q).toBeDefined()
+        if (!q) return
+
+        // On VS Code the dock's main prompt input already accepts free text as a reply,
+        // so the "Type your own answer" row is redundant and must be hidden.
+        expect(q.custom).toBe(false)
+
+        await question.reject(item.id)
+        await expect(pending).resolves.toBe("break")
+      } finally {
+        process.env.KILO_CLIENT = prev
+      }
+    }))
+
+  test("ask - emits i18n keys alongside the canonical English labels", () =>
+    withInstance(async () => {
+      const seeded = await seed({ text: "1. Build" })
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      const q = item.questions[0]
+      expect(q).toBeDefined()
+      if (!q) return
+
+      // i18n keys for question-level strings
+      expect(q.questionKey).toBe("plan.followup.question")
+      expect(q.headerKey).toBe("plan.followup.header")
+
+      // i18n keys for option labels — order matters: newSession is first, continue second.
+      expect(q.options.map((o) => o.labelKey)).toEqual([
+        "plan.followup.answer.newSession",
+        "plan.followup.answer.continue",
+        "plan.followup.answer.keepRefining",
+      ])
+      expect(q.options.map((o) => o.descriptionKey)).toEqual([
+        "plan.followup.answer.newSession.description",
+        "plan.followup.answer.continue.description",
+        "plan.followup.answer.keepRefining.description",
+      ])
+
+      // Canonical English labels stay on the wire — the server still matches on `label`,
+      // so translating the UI must not change the reply format.
+      expect(q.options.map((o) => o.label)).toEqual([
+        PlanFollowup.ANSWER_NEW_SESSION,
+        PlanFollowup.ANSWER_CONTINUE,
+        PlanFollowup.ANSWER_KEEP_REFINING,
+      ])
+
+      await question.reject(item.id)
       await expect(pending).resolves.toBe("break")
     }))
 
   test("ask - returns continue and creates code message on Continue here", () =>
     withInstance(async () => {
-      const get = spyOn(Agent, "get").mockImplementation(async (name: string) => {
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async (name: string) => {
         if (name === "code") {
           return {
             name: "code",
@@ -260,7 +455,7 @@ describe("plan follow-up", () => {
         }
         return undefined as any
       })
-      const modelSpy = spyOn(Provider, "getModel").mockResolvedValue(savedConfigFull)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(savedConfigFull)
       using _ = {
         [Symbol.dispose]() {
           get.mockRestore()
@@ -269,6 +464,7 @@ describe("plan follow-up", () => {
       }
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -277,7 +473,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
@@ -297,10 +493,17 @@ describe("plan follow-up", () => {
       expect(part.synthetic).toBe(true)
     }))
 
-  test("ask - returns continue and creates plan message for custom text", () =>
+  test("ask - returns continue and creates plan message on Keep refining", () =>
     withInstance(async () => {
+      const track = spyOn(Telemetry, "trackPlanFollowup").mockImplementation(() => {})
+      using _ = {
+        [Symbol.dispose]() {
+          track.mockRestore()
+        },
+      }
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -309,7 +512,40 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_KEEP_REFINING]],
+      })
+
+      await expect(pending).resolves.toBe("continue")
+      expect(track).toHaveBeenCalledWith(seeded.sessionID, "keep_refining")
+
+      const user = await latestUser(seeded.sessionID)
+      expect(user?.info.role).toBe("user")
+      if (!user || user.info.role !== "user") return
+      expect(user.info.agent).toBe("plan")
+
+      const part = user.parts.find((item) => item.type === "text")
+      expect(part?.type).toBe("text")
+      if (!part || part.type !== "text") return
+      expect(part.text).toBe("Continue refining the plan. Do not implement yet.")
+      expect(part.synthetic).toBe(true)
+    }))
+
+  test("ask - returns continue and creates plan message for custom text", () =>
+    withInstance(async () => {
+      const seeded = await seed({ text: "1. Build\n2. Test" })
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
         requestID: item.id,
         answers: [["Add rollback support too"]],
       })
@@ -328,9 +564,44 @@ describe("plan follow-up", () => {
       expect(part.synthetic).toBe(true)
     }))
 
+  test("ask - retargets prompt queue so injected message is visible in scope", () =>
+    withInstance(async () => {
+      const { KiloSessionPromptQueue } = await import("../../src/kilocode/session/prompt-queue")
+      const seeded = await seed({ text: "1. Refactor\n2. Ship" })
+
+      // Simulate the prompt queue having a target set (like during a running loop)
+      const original = seeded.messages.find((m) => m.info.role === "user")!.info.id
+      KiloSessionPromptQueue.retarget(seeded.sessionID, original)
+
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_CONTINUE]],
+      })
+
+      await expect(pending).resolves.toBe("continue")
+
+      // The injected user message must be visible when scoped
+      const all = await store.messages({ sessionID: seeded.sessionID })
+      const scoped = KiloSessionPromptQueue.scope(seeded.sessionID, all)
+      const injected = scoped.findLast((m) => m.info.role === "user")
+      expect(injected).toBeDefined()
+      const part = injected!.parts.find((p) => p.type === "text")
+      expect(part?.type === "text" && part.text).toBe("Implement the plan above.")
+    }))
+
   test("ask - creates a new session on Start new session with handover and todos", () =>
     withInstance(async () => {
-      const get = spyOn(Agent, "get").mockImplementation(async (name: string) => {
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async (name: string) => {
         if (name === "code") {
           return {
             name: "code",
@@ -349,7 +620,7 @@ describe("plan follow-up", () => {
           get.mockRestore()
         },
       }
-      const loop = spyOn(SessionPrompt, "loop").mockResolvedValue({
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
         info: {
           id: MessageID.make("msg_test"),
           role: "assistant",
@@ -358,8 +629,8 @@ describe("plan follow-up", () => {
             created: Date.now(),
           },
           parentID: MessageID.make("msg_parent"),
-          modelID: ModelID.make("test"),
-          providerID: ProviderID.make("test"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
           mode: "code",
           agent: "code",
           path: {
@@ -380,20 +651,20 @@ describe("plan follow-up", () => {
         },
         parts: [],
       })
-      const modelSpy = spyOn(Provider, "getModel").mockImplementation(async (providerID: string, modelID: string) => {
-        if (providerID === saved.providerID && modelID === saved.modelID) return savedConfigFull
-        return fakeModel
-      })
-      const llmSpy = spyOn(LLM, "stream").mockResolvedValue({
-        text: Promise.resolve(
-          "## Discoveries\n\nFound REST endpoints in src/api.ts\n\n## Relevant Files\n\n- src/api.ts: REST endpoints\n- src/db.ts: Database layer",
-        ),
-      } as any)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockImplementation(
+        async (providerID: string, modelID: string) => {
+          if (providerID === saved.providerID && modelID === saved.modelID) return savedConfigFull
+          return fakeModel
+        },
+      )
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockResolvedValue(
+        "## Discoveries\n\nFound REST endpoints in src/api.ts\n\n## Relevant Files\n\n- src/api.ts: REST endpoints\n- src/db.ts: Database layer",
+      )
       using _mocks = {
-        llmSpy,
+        handoverSpy,
         [Symbol.dispose]() {
           modelSpy.mockRestore()
-          llmSpy.mockRestore()
+          handoverSpy.mockRestore()
         },
       }
       using _loop = {
@@ -405,7 +676,7 @@ describe("plan follow-up", () => {
         text: "1. Add API\n2. Add tests",
       })
 
-      await Todo.update({
+      await todo.update({
         sessionID: seeded.sessionID,
         todos: [
           { content: "Add API endpoint", status: "completed", priority: "high" },
@@ -415,11 +686,12 @@ describe("plan follow-up", () => {
 
       const before = await sessions()
       const created: SessionID[] = []
-      const unsub = Bus.subscribe(TuiEvent.SessionSelect, (event) => {
+      const unsub = subscribe(TuiEvent.SessionSelect, (event) => {
         created.push(event.properties.sessionID)
       })
 
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -428,7 +700,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
       })
@@ -442,15 +714,15 @@ describe("plan follow-up", () => {
       expect(added).toHaveLength(1)
       expect(created).toHaveLength(1)
       expect(loop).toHaveBeenCalledTimes(1)
-      expect(_mocks.llmSpy).toHaveBeenCalledTimes(1)
+      expect(_mocks.handoverSpy).toHaveBeenCalledTimes(1)
 
       const newSessionID = created[0]
       const next = added[0]
       if (!newSessionID || !next) throw new Error("expected follow-up session")
       expect(next.id).toBe(newSessionID)
       expect(next.parentID).toBeUndefined()
-      const planPath = Session.plan(await Session.get(seeded.sessionID))
-      const messages = await Session.messages({ sessionID: newSessionID })
+      const planPath = Session.plan(await store.get(seeded.sessionID), Instance.current)
+      const messages = await store.messages({ sessionID: newSessionID })
       const user = messages.find((item) => item.info.role === "user")
       expect(user?.info.role).toBe("user")
       if (!user || user.info.role !== "user") throw new Error("expected seeded user message")
@@ -460,9 +732,10 @@ describe("plan follow-up", () => {
       const part = user.parts.find((item) => item.type === "text")
       expect(part?.type).toBe("text")
       if (!part || part.type !== "text") throw new Error("expected text part")
-      expect(part.text).toContain("Implement the following plan:")
       expect(part.text).toContain(`Plan file: ${planPath}`)
-      expect(part.text).toContain("1. Add API\n2. Add tests")
+      expect(part.text).toContain("Read this file first and treat it as the source of truth for implementation.")
+      expect(part.text).not.toContain("Implement the following plan:")
+      expect(part.text).not.toContain("1. Add API\n2. Add tests")
       expect(part.text).toContain("## Handover from Planning Session")
       expect(part.text).toContain("Found REST endpoints in src/api.ts")
       expect(part.text).toContain("## Todo List")
@@ -470,42 +743,63 @@ describe("plan follow-up", () => {
       expect(part.text).toContain("[ ] Write tests")
       expect(part.synthetic).toBe(false)
 
-      const newTodos = await Todo.get(newSessionID)
+      const newTodos = await todo.get(newSessionID)
       expect(newTodos).toHaveLength(2)
       expect(newTodos).toContainEqual({ content: "Add API endpoint", status: "completed", priority: "high" })
       expect(newTodos).toContainEqual({ content: "Write tests", status: "pending", priority: "medium" })
-
-      SessionPrompt.cancel(newSessionID)
     }))
 
   test("ask - creates a new session in the planning session directory when the current instance differs", () =>
     withInstance(async () => {
       await using other = await tmpdir({ git: true })
-      const get = spyOn(Agent, "get").mockImplementation(async () => undefined as any)
-      const modelSpy = spyOn(Provider, "getModel").mockResolvedValue(fakeModel)
-      const llmSpy = spyOn(LLM, "stream").mockResolvedValue({
-        text: Promise.resolve(""),
-      } as any)
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async () => undefined as any)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockResolvedValue("")
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
+        info: {
+          id: MessageID.make("msg_test"),
+          role: "assistant",
+          sessionID: SessionID.make("ses_test"),
+          time: { created: Date.now() },
+          parentID: MessageID.make("msg_parent"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "code",
+          agent: "code",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: {
+            total: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+        },
+        parts: [],
+      } as MessageV2.WithParts)
       using _mocks = {
         [Symbol.dispose]() {
           get.mockRestore()
           modelSpy.mockRestore()
-          llmSpy.mockRestore()
+          handoverSpy.mockRestore()
+          loop.mockRestore()
         },
       }
 
       const dir = other.path
 
-      const seeded = await Instance.provide({
+      const seeded = await provideTestInstance({
         directory: dir,
         fn: async () => seed({ text: "1. Add API\n2. Add tests" }),
       })
 
-      const before = await Instance.provide({
+      const before = await provideTestInstance({
         directory: dir,
         fn: async () => sessions(),
       })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -515,13 +809,13 @@ describe("plan follow-up", () => {
       expect(item).toBeDefined()
       if (!item) return
 
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
       })
 
       await expect(pending).resolves.toBe("break")
-      const after = await Instance.provide({
+      const after = await provideTestInstance({
         directory: dir,
         fn: async () => sessions(),
       })
@@ -535,18 +829,16 @@ describe("plan follow-up", () => {
       expect(next?.parentID).toBeUndefined()
 
       if (next) {
-        const planPath = await Instance.provide({
+        const planPath = await provideTestInstance({
           directory: dir,
-          fn: async () => Session.plan(await Session.get(seeded.sessionID)),
+          fn: async () => Session.plan(await store.get(seeded.sessionID), Instance.current),
         })
-        const messages = await Session.messages({ sessionID: next.id })
+        const messages = await store.messages({ sessionID: next.id })
         const user = messages.find((item) => item.info.role === "user")
         if (!user || user.info.role !== "user") throw new Error("expected user message")
         const part = user.parts.find((item) => item.type === "text")
         if (!part || part.type !== "text") throw new Error("expected text part")
         expect(part.text).toContain(`Plan file: ${planPath}`)
-
-        SessionPrompt.cancel(next.id)
       }
     }))
 
@@ -556,7 +848,7 @@ describe("plan follow-up", () => {
         model: { code: saved },
         variant: { [savedKey]: savedVar },
       })
-      const get = spyOn(Agent, "get").mockImplementation(async (name: string) => {
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async (name: string) => {
         if (name === "code") {
           return {
             name: "code",
@@ -569,11 +861,13 @@ describe("plan follow-up", () => {
         }
         return undefined as any
       })
-      const modelSpy = spyOn(Provider, "getModel").mockImplementation(async (providerID: string, modelID: string) => {
-        if (providerID === saved.providerID && modelID === saved.modelID) return savedFull
-        if (providerID === config.providerID && modelID === config.modelID) return configFull
-        throw new Error(`unexpected model lookup ${providerID}/${modelID}`)
-      })
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockImplementation(
+        async (providerID: string, modelID: string) => {
+          if (providerID === saved.providerID && modelID === saved.modelID) return savedFull
+          if (providerID === config.providerID && modelID === config.modelID) return configFull
+          throw new Error(`unexpected model lookup ${providerID}/${modelID}`)
+        },
+      )
       using _ = {
         [Symbol.dispose]() {
           get.mockRestore()
@@ -582,6 +876,7 @@ describe("plan follow-up", () => {
       }
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -590,7 +885,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
@@ -606,8 +901,8 @@ describe("plan follow-up", () => {
 
   test("ask - falls back to configured code model when saved CLI code model is unavailable", () =>
     withInstance(async () => {
-      await writeState({ model: { code: { providerID: ProviderID.make("missing"), modelID: ModelID.make("ghost") } } })
-      const get = spyOn(Agent, "get").mockImplementation(async (name: string) => {
+      await writeState({ model: { code: { providerID: ProviderV2.ID.make("missing"), modelID: ModelV2.ID.make("ghost") } } })
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async (name: string) => {
         if (name === "code") {
           return {
             name: "code",
@@ -620,10 +915,12 @@ describe("plan follow-up", () => {
         }
         return undefined as any
       })
-      const modelSpy = spyOn(Provider, "getModel").mockImplementation(async (providerID: string, modelID: string) => {
-        if (providerID === "missing" && modelID === "ghost") throw new Error("missing model")
-        return configFull
-      })
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockImplementation(
+        async (providerID: string, modelID: string) => {
+          if (providerID === "missing" && modelID === "ghost") throw new Error("missing model")
+          return configFull
+        },
+      )
       using _ = {
         [Symbol.dispose]() {
           get.mockRestore()
@@ -632,6 +929,7 @@ describe("plan follow-up", () => {
       }
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -640,7 +938,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
@@ -656,7 +954,7 @@ describe("plan follow-up", () => {
 
   test("ask - falls back to planning model when no saved or configured code model exists", () =>
     withInstance(async () => {
-      const get = spyOn(Agent, "get").mockImplementation(async (name: string) => {
+      const get = spyOn(PlanFollowupRuntime, "agent").mockImplementation(async (name: string) => {
         if (name === "code") return undefined as any
         return undefined as any
       })
@@ -667,6 +965,7 @@ describe("plan follow-up", () => {
       }
       const seeded = await seed({ text: "1. Build\n2. Test", variant: planVar })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -675,7 +974,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_CONTINUE]],
       })
@@ -691,15 +990,15 @@ describe("plan follow-up", () => {
 
   test("ask - new session omits handover section when LLM returns empty", () =>
     withInstance(async () => {
-      const loop = spyOn(SessionPrompt, "loop").mockResolvedValue({
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
         info: {
           id: MessageID.make("msg_test"),
           role: "assistant",
           sessionID: SessionID.make("ses_test"),
           time: { created: Date.now() },
           parentID: MessageID.make("msg_parent"),
-          modelID: ModelID.make("test"),
-          providerID: ProviderID.make("test"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
           mode: "code",
           agent: "code",
           path: { cwd: "/tmp", root: "/tmp" },
@@ -722,11 +1021,12 @@ describe("plan follow-up", () => {
       }
       const seeded = await seed({ text: "1. Add API\n2. Add tests" })
       const created: SessionID[] = []
-      const unsub = Bus.subscribe(TuiEvent.SessionSelect, (event) => {
+      const unsub = subscribe(TuiEvent.SessionSelect, (event) => {
         created.push(event.properties.sessionID)
       })
 
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -735,7 +1035,7 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
       })
@@ -745,29 +1045,411 @@ describe("plan follow-up", () => {
 
       const newSessionID = created[0]
       if (!newSessionID) throw new Error("expected follow-up session")
-      const messages = await Session.messages({ sessionID: newSessionID })
+      const messages = await store.messages({ sessionID: newSessionID })
       const user = messages.find((item) => item.info.role === "user")
       if (!user || user.info.role !== "user") throw new Error("expected user message")
       const part = user.parts.find((item) => item.type === "text")
       if (!part || part.type !== "text") throw new Error("expected text part")
-      expect(part.text).toContain("Implement the following plan:")
+      expect(part.text).toContain("Plan file:")
+      expect(part.text).toContain("Read this file first and treat it as the source of truth for implementation.")
+      expect(part.text).not.toContain("Implement the following plan:")
+      expect(part.text).not.toContain("1. Add API\n2. Add tests")
       expect(part.text).not.toContain("## Handover from Planning Session")
       expect(part.text).not.toContain("## Todo List")
+    }))
 
-      SessionPrompt.cancel(newSessionID)
+  test("ask - new session references plan file without copying planning transcript", () =>
+    withInstance(async () => {
+      using _mocks = mockHandoverDeps("## Discoveries\n\nUse the saved plan file as the source of truth.")
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
+        info: {
+          id: MessageID.make("msg_test"),
+          role: "assistant",
+          sessionID: SessionID.make("ses_test"),
+          time: { created: Date.now() },
+          parentID: MessageID.make("msg_parent"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "code",
+          agent: "code",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [],
+      } as MessageV2.WithParts)
+      using _loop = {
+        [Symbol.dispose]() {
+          loop.mockRestore()
+        },
+      }
+
+      const transcript = "I inspected plan-followup.ts and found the session handoff path."
+      const seeded = await seed({
+        text: `${transcript}\n\nThis is visible planning chat, not implementation input.`,
+        tools: [
+          {
+            tool: "plan_exit",
+            input: {},
+            output: "Plan is ready. Ending planning turn.",
+          },
+        ],
+      })
+      const user = seeded.messages.find((m) => m.info.role === "user")?.info
+      if (!user || user.role !== "user") throw new Error("expected seeded user message")
+
+      await store.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        sessionID: seeded.sessionID,
+        time: { created: Date.now() + 1 },
+        parentID: user.id,
+        modelID: model.modelID,
+        providerID: model.providerID,
+        mode: "plan",
+        agent: "plan",
+        path: { cwd: Instance.directory, root: Instance.worktree },
+        cost: 0,
+        tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        finish: "end_turn",
+      } satisfies MessageV2.Assistant)
+
+      const messages = await store.messages({ sessionID: seeded.sessionID })
+      const created: SessionID[] = []
+      const unsub = subscribe(TuiEvent.SessionSelect, (event) => {
+        created.push(event.properties.sessionID)
+      })
+      using _bus = {
+        [Symbol.dispose]() {
+          unsub()
+        },
+      }
+
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
+      })
+
+      await expect(pending).resolves.toBe("break")
+
+      const id = created[0]
+      if (!id) throw new Error("expected follow-up session")
+      const plan = Session.plan(await store.get(seeded.sessionID), Instance.current)
+      const next = await store.messages({ sessionID: id })
+      const msg = next.find((m) => m.info.role === "user")
+      const part = msg?.parts.find((p) => p.type === "text")
+      expect(part?.type).toBe("text")
+      if (part?.type !== "text") return
+
+      expect(part.text).toContain(`Plan file: ${plan}`)
+      expect(part.text).toContain("Read this file first and treat it as the source of truth for implementation.")
+      expect(part.text).toContain("## Handover from Planning Session")
+      expect(part.text).toContain("Use the saved plan file as the source of truth.")
+      expect(part.text).not.toContain("Implement the following plan:")
+      expect(part.text).not.toContain(transcript)
+      expect(part.text).not.toContain("This is visible planning chat")
+    }))
+
+  test("ask - fires session.created before generateHandover resolves on Start new session", () =>
+    withInstance(async () => {
+      // Regression guard: the VS Code extension gates `session.created` SSE events
+      // behind a 30-second pendingFollowup TTL. If startNew awaits the handover
+      // LLM call before creating the session, a slow LLM response expires the TTL
+      // and the webview never learns about the new session. This test asserts the
+      // session is created *before* the handover resolves, guaranteeing the SSE
+      // event fires while the TTL is still fresh.
+      const seeded = await seed({ text: "1. Build" })
+
+      let createdAt: number | undefined
+      let handoverResolvedAt: number | undefined
+      const unsub = subscribe(Session.Event.Created, (event) => {
+        // Ignore the seeded planning session; we only care about the follow-up.
+        if (event.properties.info.id === seeded.sessionID) return
+        if (createdAt === undefined) createdAt = performance.now()
+      })
+
+      const deferred = Promise.withResolvers<string>()
+      const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(fakeAgent as any)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockImplementation(() =>
+        deferred.promise.then((text) => {
+          handoverResolvedAt = performance.now()
+          return text
+        }),
+      )
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
+        info: {
+          id: MessageID.make("msg_test"),
+          role: "assistant",
+          sessionID: SessionID.make("ses_test"),
+          time: { created: Date.now() },
+          parentID: MessageID.make("msg_parent"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "code",
+          agent: "code",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: {
+            total: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+        },
+        parts: [],
+      } as MessageV2.WithParts)
+      using _ = {
+        [Symbol.dispose]() {
+          agentSpy.mockRestore()
+          modelSpy.mockRestore()
+          handoverSpy.mockRestore()
+          loop.mockRestore()
+          unsub()
+        },
+      }
+
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
+      })
+
+      // Poll until session.created fires. With the fix, this happens promptly
+      // because Session.create runs before generateHandover. Without the fix,
+      // startNew would still be blocked on the deferred LLM stream.
+      for (let i = 0; i < 100; i++) {
+        if (createdAt !== undefined) break
+        await Bun.sleep(10)
+      }
+      expect(createdAt).toBeDefined()
+      // Handover must still be pending; if it had resolved, the race is open.
+      expect(handoverResolvedAt).toBeUndefined()
+
+      deferred.resolve("## Discoveries\n\nexample")
+      await expect(pending).resolves.toBe("break")
+
+      expect(handoverResolvedAt).toBeDefined()
+      expect(createdAt!).toBeLessThan(handoverResolvedAt!)
+    }))
+
+  test("ask - injects plan-file message before generateHandover resolves on Start new session", () =>
+    withInstance(async () => {
+      // Regression guard: the plan-file handoff must appear in the new session tab
+      // immediately after the tab switch without waiting for the slow handover LLM
+      // call. The handover is then appended to the same part in-place.
+      const seeded = await seed({ text: "1. Build" })
+
+      let followup: SessionID | undefined
+      const unsub = subscribe(Session.Event.Created, (event) => {
+        if (event.properties.info.id === seeded.sessionID) return
+        if (!followup) followup = event.properties.info.id
+      })
+
+      const deferred = Promise.withResolvers<string>()
+      const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(fakeAgent as any)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockImplementation(() => deferred.promise)
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
+        info: {
+          id: MessageID.make("msg_test"),
+          role: "assistant",
+          sessionID: SessionID.make("ses_test"),
+          time: { created: Date.now() },
+          parentID: MessageID.make("msg_parent"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "code",
+          agent: "code",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [],
+      } as MessageV2.WithParts)
+      using _ = {
+        [Symbol.dispose]() {
+          agentSpy.mockRestore()
+          modelSpy.mockRestore()
+          handoverSpy.mockRestore()
+          loop.mockRestore()
+          unsub()
+        },
+      }
+
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
+      })
+
+      // Poll until the plan text lands. Handover is still pending because
+      // deferred has not resolved yet.
+      for (let i = 0; i < 100; i++) {
+        if (followup) {
+          const msgs = await store.messages({ sessionID: followup })
+          const user = msgs.find((m) => m.info.role === "user")
+          const part = user?.parts.find((p) => p.type === "text")
+          if (part?.type === "text" && part.text.includes("Read this file first")) break
+        }
+        await Bun.sleep(10)
+      }
+
+      expect(followup).toBeDefined()
+      if (!followup) return
+      const initial = await store.messages({ sessionID: followup })
+      const initialUser = initial.find((m) => m.info.role === "user")
+      const initialPart = initialUser?.parts.find((p) => p.type === "text")
+      expect(initialPart?.type).toBe("text")
+      if (initialPart?.type !== "text") return
+      expect(initialPart.text).toContain("Plan file:")
+      expect(initialPart.text).toContain("Read this file first and treat it as the source of truth for implementation.")
+      expect(initialPart.text).not.toContain("Implement the following plan:")
+      expect(initialPart.text).not.toContain("1. Build")
+      // Handover is still deferred — must not be present yet.
+      expect(initialPart.text).not.toContain("## Handover from Planning Session")
+
+      deferred.resolve("## Discoveries\n\nexample")
+      await expect(pending).resolves.toBe("break")
+
+      // Same part ID updated in-place — handover section now present.
+      const final = await store.messages({ sessionID: followup })
+      const finalUser = final.find((m) => m.info.role === "user")
+      const finalPart = finalUser?.parts.find((p) => p.type === "text")
+      if (finalPart?.type !== "text") return
+      expect(finalPart.id).toBe(initialPart.id)
+      expect(finalPart.text).toContain("Read this file first and treat it as the source of truth for implementation.")
+      expect(finalPart.text).not.toContain("Implement the following plan:")
+      expect(finalPart.text).toContain("## Handover from Planning Session")
+      expect(finalPart.text).toContain("example")
+    }))
+
+  test("ask - marks new session busy while handover is pending and clears on abort", () =>
+    withInstance(async () => {
+      const seeded = await seed({ text: "1. Build" })
+
+      let followup: SessionID | undefined
+      const states: Array<{ sessionID: SessionID; type: string }> = []
+      const created = subscribe(Session.Event.Created, (event) => {
+        if (event.properties.info.id === seeded.sessionID) return
+        if (!followup) followup = event.properties.info.id
+      })
+      const status = subscribe(SessionStatus.Event.Status, (event) => {
+        states.push({ sessionID: event.properties.sessionID, type: event.properties.status.type })
+      })
+
+      const deferred = Promise.withResolvers<string>()
+      const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(fakeAgent as any)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockImplementation(() => deferred.promise)
+      const loop = spyOn(PlanFollowupRuntime, "loop").mockResolvedValue({
+        info: {
+          id: MessageID.make("msg_test"),
+          role: "assistant",
+          sessionID: SessionID.make("ses_test"),
+          time: { created: Date.now() },
+          parentID: MessageID.make("msg_parent"),
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          mode: "code",
+          agent: "code",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [],
+      } as MessageV2.WithParts)
+      using _ = {
+        [Symbol.dispose]() {
+          agentSpy.mockRestore()
+          modelSpy.mockRestore()
+          handoverSpy.mockRestore()
+          loop.mockRestore()
+          created()
+          status()
+        },
+      }
+
+      const pending = PlanFollowup.ask({
+        question,
+        sessionID: seeded.sessionID,
+        messages: seeded.messages,
+        abort: AbortSignal.any([]),
+      })
+
+      const item = await waitQuestion(seeded.sessionID)
+      expect(item).toBeDefined()
+      if (!item) return
+      await question.reply({
+        requestID: item.id,
+        answers: [[PlanFollowup.ANSWER_NEW_SESSION]],
+      })
+
+      for (let i = 0; i < 100; i++) {
+        if (followup && states.some((x) => x.sessionID === followup && x.type === "busy")) break
+        await Bun.sleep(10)
+      }
+
+      expect(followup).toBeDefined()
+      if (!followup) return
+      const sid = followup
+      expect(states.some((x) => x.sessionID === sid && x.type === "busy")).toBe(true)
+
+      const { SessionPrompt } = await import("../../src/session/prompt")
+      await Effect.runPromise(
+        SessionPrompt.Service.use((svc) => svc.cancel(sid)).pipe(
+          Effect.provide(SessionPrompt.defaultLayer),
+          Effect.scoped,
+        ),
+      )
+      deferred.resolve("## Discoveries\n\nexample")
+      await expect(pending).resolves.toBe("break")
+
+      expect(states.some((x) => x.sessionID === followup && x.type === "idle")).toBe(true)
+      expect(loop).not.toHaveBeenCalled()
     }))
 
   test("ask - returns break when assistant text is empty", () =>
     withInstance(async () => {
       const seeded = await seed({ text: "   " })
       const result = await PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
       })
 
       expect(result).toBe("break")
-      expect(await Question.list()).toHaveLength(0)
+      expect(await question.list()).toHaveLength(0)
     }))
 
   test("ask - returns break when already aborted", () =>
@@ -776,6 +1458,7 @@ describe("plan follow-up", () => {
       abort.abort()
 
       const result = await PlanFollowup.ask({
+        question,
         sessionID: SessionID.make("ses_test"),
         messages: [],
         abort: abort.signal,
@@ -789,6 +1472,7 @@ describe("plan follow-up", () => {
       const abort = new AbortController()
       const seeded = await seed({ text: "1. Step one\n2. Step two" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: abort.signal,
@@ -801,13 +1485,14 @@ describe("plan follow-up", () => {
       abort.abort()
 
       await expect(pending).resolves.toBe("break")
-      expect(await Question.list()).toHaveLength(0)
+      expect(await question.list()).toHaveLength(0)
     }))
 
   test("ask - returns break for blank custom answer", () =>
     withInstance(async () => {
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const pending = PlanFollowup.ask({
+        question,
         sessionID: seeded.sessionID,
         messages: seeded.messages,
         abort: AbortSignal.any([]),
@@ -816,13 +1501,13 @@ describe("plan follow-up", () => {
       const item = await waitQuestion(seeded.sessionID)
       expect(item).toBeDefined()
       if (!item) return
-      await Question.reply({
+      await question.reply({
         requestID: item.id,
         answers: [["   "]],
       })
 
       await expect(pending).resolves.toBe("break")
-      expect((await Session.messages({ sessionID: seeded.sessionID })).length).toBe(2)
+      expect((await store.messages({ sessionID: seeded.sessionID })).length).toBe(2)
     }))
 
   test("formatTodos - returns empty string for no todos", () => {
@@ -840,16 +1525,16 @@ describe("plan follow-up", () => {
     expect(result).toBe("- [x] Set up project\n- [~] Write code\n- [ ] Add tests\n- [-] Dropped task")
   })
 
-  test("generateHandover - returns empty string on LLM.stream failure", () =>
+  test("generateHandover - returns empty string on LLM stream failure", () =>
     withInstance(async () => {
-      const agentSpy = spyOn(Agent, "get").mockResolvedValue(fakeAgent)
-      const modelSpy = spyOn(Provider, "getModel").mockResolvedValue(fakeModel)
-      const llmSpy = spyOn(LLM, "stream").mockRejectedValue(new Error("provider unavailable"))
+      const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(fakeAgent)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockRejectedValue(new Error("provider unavailable"))
       using _ = {
         [Symbol.dispose]() {
           agentSpy.mockRestore()
           modelSpy.mockRestore()
-          llmSpy.mockRestore()
+          handoverSpy.mockRestore()
         },
       }
       const seeded = await seed({ text: "1. Build\n2. Test" })
@@ -857,22 +1542,16 @@ describe("plan follow-up", () => {
       expect(result).toBe("")
     }))
 
-  test("generateHandover - returns empty string on stream.text rejection", () =>
+  test("generateHandover - returns empty string on text stream rejection", () =>
     withInstance(async () => {
-      const agentSpy = spyOn(Agent, "get").mockResolvedValue(fakeAgent)
-      const modelSpy = spyOn(Provider, "getModel").mockResolvedValue(fakeModel)
-      const textPromise = new Promise<string>((_, reject) => {
-        setTimeout(() => reject(new Error("stream aborted")), 0)
-      })
-      textPromise.catch(() => {})
-      const llmSpy = spyOn(LLM, "stream").mockResolvedValue({
-        text: textPromise,
-      } as any)
+      const agentSpy = spyOn(PlanFollowupRuntime, "agent").mockResolvedValue(fakeAgent)
+      const modelSpy = spyOn(PlanFollowupRuntime, "model").mockResolvedValue(fakeModel)
+      const handoverSpy = spyOn(PlanFollowupRuntime, "handover").mockRejectedValue(new Error("stream aborted"))
       using _ = {
         [Symbol.dispose]() {
           agentSpy.mockRestore()
           modelSpy.mockRestore()
-          llmSpy.mockRestore()
+          handoverSpy.mockRestore()
         },
       }
       const seeded = await seed({ text: "1. Build\n2. Test" })
@@ -887,7 +1566,7 @@ describe("plan follow-up", () => {
       const result = await generateHandover({ messages: seeded.messages, model })
       expect(result).toBe("## Discoveries\n\nFallback works")
       expect(mocks.agentSpy).toHaveBeenCalledWith("compaction")
-      expect(mocks.llmSpy).toHaveBeenCalledTimes(1)
+      expect(mocks.handoverSpy).toHaveBeenCalledTimes(1)
     }))
 
   test("generateHandover - returns LLM output on success", () =>
@@ -896,6 +1575,6 @@ describe("plan follow-up", () => {
       const seeded = await seed({ text: "1. Build\n2. Test" })
       const result = await generateHandover({ messages: seeded.messages, model })
       expect(result).toBe("## Discoveries\n\nKey finding here")
-      expect(mocks.llmSpy).toHaveBeenCalledTimes(1)
+      expect(mocks.handoverSpy).toHaveBeenCalledTimes(1)
     }))
 })

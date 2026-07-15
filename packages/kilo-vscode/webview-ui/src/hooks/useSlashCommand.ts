@@ -1,8 +1,23 @@
-import { createSignal, onCleanup, onMount } from "solid-js"
+import { createSignal, onCleanup } from "solid-js"
 import type { Accessor } from "solid-js"
 import type { SlashCommandInfo, WebviewMessage, ExtensionMessage } from "../types/messages"
 
 export const SLASH_PATTERN = /^\/(\S*)$/
+
+function getMatchScore(cmd: SlashCommandEntry, lower: string): number {
+  const name = cmd.name.toLowerCase()
+  if (name === lower) return 3
+  if (name.startsWith(lower)) return 2
+  if (name.includes(lower)) return 1
+  if (cmd.description?.toLowerCase().includes(lower)) return 1
+  if (cmd.hints.some((h) => h.toLowerCase().includes(lower))) return 1
+  return 0
+}
+
+export function sortByScore(matches: SlashCommandEntry[], query: string): SlashCommandEntry[] {
+  const lower = query.toLowerCase()
+  return [...matches].sort((a, b) => getMatchScore(b, lower) - getMatchScore(a, lower))
+}
 
 interface VSCodeContext {
   postMessage: (message: WebviewMessage) => void
@@ -11,6 +26,7 @@ interface VSCodeContext {
 
 export interface SlashCommandEntry extends SlashCommandInfo {
   action?: () => void
+  enabled?: Accessor<boolean>
 }
 
 export interface SlashCommand {
@@ -35,10 +51,15 @@ export interface SlashCommand {
   close: () => void
 }
 
-export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): SlashCommand {
+export function useSlashCommand(
+  vscode: VSCodeContext,
+  sandbox: { action: () => void; enabled: Accessor<boolean> },
+  exclude?: Set<string> | Accessor<Set<string>>,
+): SlashCommand {
   const [server, setServer] = createSignal<SlashCommandInfo[]>([])
   const [query, setQuery] = createSignal<string | null>(null)
   const [index, setIndex] = createSignal(0)
+  const [requested, setRequested] = createSignal(false)
 
   const all: SlashCommandEntry[] = [
     {
@@ -75,6 +96,14 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
       },
     },
     {
+      name: "variant",
+      description: "Switch the reasoning effort",
+      hints: ["variants", "reasoning", "thinking"],
+      action: () => {
+        window.dispatchEvent(new CustomEvent("openVariantPicker"))
+      },
+    },
+    {
       name: "help",
       description: "Open help documentation",
       hints: [],
@@ -88,6 +117,14 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
       hints: ["smol", "condense"],
       action: () => {
         window.dispatchEvent(new CustomEvent("compactSession"))
+      },
+    },
+    {
+      name: "export",
+      description: "Export the current session transcript as Markdown",
+      hints: ["markdown", "transcript"],
+      action: () => {
+        window.dispatchEvent(new CustomEvent("exportSessionTranscript"))
       },
     },
     {
@@ -106,17 +143,57 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
         vscode.postMessage({ type: "toggleRemote" })
       },
     },
+    {
+      name: "kiloclaw",
+      description: "Open KiloClaw chat",
+      hints: ["claw"],
+      action: () => {
+        vscode.postMessage({ type: "openKiloClaw" })
+      },
+    },
+    {
+      name: "sandbox",
+      description: "Toggle sandbox",
+      hints: [],
+      action: sandbox.action,
+      enabled: sandbox.enabled,
+    },
+    {
+      name: "reload",
+      description: "Reload config, skills, agents, and commands from disk",
+      hints: ["refresh"],
+      action: () => {
+        vscode.postMessage({ type: "reload" })
+      },
+    },
   ]
 
-  const client = exclude ? all.filter((c) => !exclude.has(c.name)) : all
+  const excluded = () => {
+    if (typeof exclude === "function") return exclude()
+    return exclude
+  }
+
+  const client = () => {
+    const set = excluded()
+    if (!set) return all
+    return all.filter((c) => !set.has(c.name))
+  }
 
   const commands = (): SlashCommandEntry[] => {
-    const names = new Set(client.map((c) => c.name))
-    const filtered = server().filter((c) => !names.has(c.name))
-    return [...client, ...filtered]
+    const list = client()
+    const names = new Set(list.map((c) => c.name))
+    const set = excluded()
+    const filtered = server().filter((c) => !names.has(c.name) && !set?.has(c.name))
+    return [...list, ...filtered]
   }
 
   const show = () => query() !== null
+
+  const request = () => {
+    if (requested()) return
+    setRequested(true)
+    vscode.postMessage({ type: "requestCommands" })
+  }
 
   const results = () => {
     const q = query()
@@ -124,21 +201,18 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
     const all = commands()
     if (!q) return all
     const lower = q.toLowerCase()
-    return all.filter(
+    const matches = all.filter(
       (cmd) =>
         cmd.name.toLowerCase().includes(lower) ||
         cmd.description?.toLowerCase().includes(lower) ||
         cmd.hints.some((h) => h.toLowerCase().includes(lower)),
     )
+    return sortByScore(matches, lower)
   }
 
   const unsubscribe = vscode.onMessage((message) => {
     if (message.type !== "commandsLoaded") return
     setServer(message.commands)
-  })
-
-  onMount(() => {
-    vscode.postMessage({ type: "requestCommands" })
   })
 
   onCleanup(() => {
@@ -153,6 +227,7 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
     const before = val.substring(0, cursor)
     const match = before.match(SLASH_PATTERN)
     if (match) {
+      request()
       setQuery(match[1])
       setIndex(0)
     } else {
@@ -167,6 +242,7 @@ export function useSlashCommand(vscode: VSCodeContext, exclude?: Set<string>): S
     onSelect?: () => void,
   ) => {
     if (cmd.action) {
+      if (cmd.enabled && !cmd.enabled()) return
       textarea.value = ""
       setText("")
       close()

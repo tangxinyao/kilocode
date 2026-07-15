@@ -1,5 +1,7 @@
 export const dict = {
   "agentManager.local": "local",
+  "agentManager.sidebar.collapse": "Contraer barra lateral",
+  "agentManager.sidebar.expand": "Mostrar barra lateral",
   "agentManager.section.worktrees": "WORKTREES",
   "agentManager.section.sessions": "SESIONES",
   "agentManager.notGitRepo": "No es un repositorio git",
@@ -44,10 +46,23 @@ export const dict = {
   "agentManager.session.readonly": "Sesión de solo lectura",
   "agentManager.session.noSessions": "No hay sesiones abiertas",
   "agentManager.tab.close": "Cerrar",
+  "agentManager.tab.closeOthers": "Cerrar otras",
   "agentManager.tab.closeTab": "Cerrar pestaña",
   "agentManager.tab.forkSession": "Bifurcar sesión",
   "agentManager.tab.terminal": "Terminal",
   "agentManager.tab.openTerminal": "Abrir Terminal",
+  "agentManager.tab.newOptions": "Más opciones de nueva pestaña",
+  "agentManager.tabsMenu.status.waiting": "Espera",
+  "agentManager.tabsMenu.status.retry": "Reintento",
+  "agentManager.sidebarSearch.label": "Buscar Worktrees y sesiones",
+  "agentManager.sidebarSearch.scope":
+    "Busca en el espacio de trabajo local, las sesiones locales, los Worktrees y sus sesiones",
+  "agentManager.sidebarSearch.contexts": "LOCAL & WORKTREES",
+
+  "agentManager.terminal.new": "Nueva pestaña de terminal",
+  "agentManager.terminal.ended": "terminal finalizado — cierra la pestaña para descartar",
+  "agentManager.terminal.connectionError": "error de conexión del terminal",
+  "agentManager.terminal.errorTitle": "Error de terminal",
   "agentManager.setup.failed": "Error en la configuración del worktree",
   "agentManager.setup.settingUp": "Configurando worktree",
   "agentManager.setup.error.git_not_found":
@@ -66,7 +81,8 @@ export const dict = {
   "agentManager.shortcuts.nextItem": "Siguiente elemento",
   "agentManager.shortcuts.newWorktree": "Nuevo Worktree",
   "agentManager.shortcuts.openWorktree": "Abrir Worktree",
-  "agentManager.shortcuts.advancedWorktree": "Worktree avanzado",
+  "agentManager.shortcuts.openPR": "Abrir pull request",
+  "agentManager.shortcuts.advancedWorktree": "Configurar nuevo worktree",
   "agentManager.shortcuts.deleteWorktree": "Eliminar Worktree",
   "agentManager.shortcuts.previousTab": "Pestaña anterior",
   "agentManager.shortcuts.nextTab": "Siguiente pestaña",
@@ -88,6 +104,7 @@ export const dict = {
   "agentManager.dialog.removeStaleWorktree.confirm": "Eliminar Worktree obsoleto",
 
   "agentManager.dialog.openWorktree": "Nuevo Worktree",
+  "agentManager.dialog.configureWorktree": "Configurar Nuevo Worktree...",
   "agentManager.dialog.tab.new": "Nuevo",
   "agentManager.dialog.tab.import": "Importar",
   "agentManager.dialog.namePlaceholder": "Nombre del Worktree (opcional)",
@@ -168,6 +185,13 @@ export const dict = {
   "agentManager.review.collapsedOnly": "{{count}} contraídos",
   "agentManager.review.collapsedWithLarge": "{{collapsed}} contraídos, {{large}} grandes",
   "agentManager.review.largeFileCollapsed": "Archivo grande (contraído)",
+  "agentManager.review.image": "Imagen",
+  "agentManager.review.imageBefore": "Antes",
+  "agentManager.review.imageAfter": "Después",
+  "agentManager.review.imageTooLarge": "La imagen es demasiado grande para previsualizarla ({{size}}).",
+  "agentManager.review.imageUnreadable": "No se pudo renderizar esta imagen.",
+  "agentManager.review.imageUnavailable":
+    "La vista previa de la imagen no está disponible para esta instantánea de la sesión.",
   "agentManager.review.endOfLongDiff": "¡Llegaste al final!",
 
   "agentManager.import.pullRequest": "Pull Request",

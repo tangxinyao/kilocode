@@ -20,6 +20,13 @@ import java.io.File
  *     `JsonElement` for dynamic JSON values.
  *  7. Empty anyOf wrappers — `anyOf` unions that generate empty classes.
  *     Replaced with `kotlinx.serialization.json.JsonElement`.
+ *  9. AnyOf union wrappers — `anyOf` unions like `boolean | object` that
+ *     generate paired `Foo` + `FooAnyOf` classes the generator can't flatten.
+ *     Replaced with `kotlinx.serialization.json.JsonElement`.
+ * 10. JsonElement query parameters — anyOf query params generate empty
+ *     `if (param != null) {}` blocks. Emit the primitive JSON text instead.
+ * 11. Missing model imports — references to models the generator did not emit
+ *     are replaced with JsonElement.
  */
 abstract class FixGeneratedApiTask : DefaultTask() {
     @get:OutputDirectory
@@ -29,6 +36,9 @@ abstract class FixGeneratedApiTask : DefaultTask() {
     fun run() {
         val root = generated.get().asFile
         fixEmptyWrappers(root)
+        fixAnyOfUnionWrappers(root)
+        fixMissingModels(root)
+        fixJsonElementQueryParams(root)
         root.walkTopDown().filter { it.extension == "kt" }.forEach { fix(it) }
     }
 
@@ -55,6 +65,103 @@ abstract class FixGeneratedApiTask : DefaultTask() {
                 changed = true
             }
             if (changed) file.writeText(text)
+        }
+    }
+
+    /**
+     * Fix 9: anyOf union wrappers — the generator creates paired `Foo` and
+     * `FooAnyOf` data classes for `anyOf` unions like `boolean | object`.
+     * When both classes have identical fields it means the generator couldn't
+     * flatten the union; neither class can represent all JSON forms, so replace
+     * them with `kotlinx.serialization.json.JsonElement`.
+     */
+    private fun fixAnyOfUnionWrappers(root: File) {
+        val models = File(root, "ai/kilocode/jetbrains/api/model")
+        if (!models.isDirectory) return
+
+        val files = models.listFiles()?.filter { it.extension == "kt" } ?: return
+        val byName = files.associateBy { it.nameWithoutExtension }
+
+        val field = Regex("""\bval\s+`?(\w+)`?\s*:""")
+        fun fields(file: File): Set<String> =
+            field.findAll(file.readText()).map { it.groupValues[1] }.toSet()
+
+        // Collect wrapper pairs where Foo and FooAnyOf have identical fields —
+        // a sign the generator duplicated one anyOf variant as a wrapper.
+        val wrappers = mutableListOf<String>()
+        for ((name, file) in byName) {
+            if (!name.endsWith("AnyOf")) continue
+            val parent = name.removeSuffix("AnyOf")
+            val parentFile = byName[parent] ?: continue
+            if (fields(file) == fields(parentFile)) {
+                wrappers.add(name)
+                wrappers.add(parent)
+            }
+        }
+        if (wrappers.isEmpty()) return
+
+        // Sort longest-first so replacements don't collide (e.g. FooAnyOf before Foo).
+        wrappers.sortByDescending { it.length }
+
+        for (name in wrappers) File(models, "$name.kt").delete()
+
+        root.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            var text = file.readText()
+            var changed = false
+            for (name in wrappers) {
+                if (!text.contains(name)) continue
+                text = text.replace(Regex("""import [^\n]*\.$name\n"""), "")
+                text = text.replace(Regex("""\b$name\b"""), "kotlinx.serialization.json.JsonElement")
+                changed = true
+            }
+            if (changed) file.writeText(text)
+        }
+    }
+
+    private fun fixJsonElementQueryParams(root: File) {
+        val api = File(root, "ai/kilocode/jetbrains/api/client/DefaultApi.kt")
+        if (!api.isFile) return
+
+        val models = File(root, "ai/kilocode/jetbrains/api/model")
+        val missing = mutableSetOf<String>()
+        val text = Regex("""import ai\.kilocode\.jetbrains\.api\.model\.(\w+Parameter)\n""")
+            .replace(api.readText()) { m ->
+                val name = m.groupValues[1]
+                if (File(models, "$name.kt").isFile) return@replace m.value
+                missing.add(name)
+                ""
+            }
+            .let { input ->
+                missing.fold(input) { acc, name ->
+                    acc.replace(Regex("""\b$name\b"""), "kotlinx.serialization.json.JsonElement")
+                }
+            }
+        val empty = Regex("""(\s*)if \((\w+) != null\) \{\s*\n\s*\}""")
+        val fixed = empty.replace(text) { m ->
+            val pad = m.groupValues[1]
+            val name = m.groupValues[2]
+            "${pad}if ($name != null) {\n${pad}    put(\"$name\", listOf($name.toString()))\n$pad}"
+        }
+        if (fixed != text) api.writeText(fixed)
+    }
+
+    private fun fixMissingModels(root: File) {
+        val models = File(root, "ai/kilocode/jetbrains/api/model")
+        if (!models.isDirectory) return
+
+        val imports = Regex("""import ai\.kilocode\.jetbrains\.api\.model\.(\w+)\n""")
+        root.walkTopDown().filter { it.extension == "kt" }.forEach { file ->
+            val missing = mutableSetOf<String>()
+            val text = imports.replace(file.readText()) { m ->
+                val name = m.groupValues[1]
+                if (File(models, "$name.kt").isFile) return@replace m.value
+                missing.add(name)
+                ""
+            }
+            val fixed = missing.fold(text) { acc, name ->
+                acc.replace(Regex("""\b$name\b"""), "kotlinx.serialization.json.JsonElement")
+            }
+            if (fixed != text || missing.isNotEmpty()) file.writeText(fixed)
         }
     }
 
@@ -134,7 +241,7 @@ abstract class FixGeneratedApiTask : DefaultTask() {
             }
         }
 
-        // Fix 7: Default values for non-nullable primitives in model data classes.
+        // Fix 7: Default values for non-nullable primitives and collections in model data classes.
         // The CLI API may omit fields that the OpenAPI spec marks as required
         // (e.g. `attachment`, `reasoning` on dynamically added models).
         // Add Kotlin defaults so kotlinx.serialization doesn't throw
@@ -146,6 +253,9 @@ abstract class FixGeneratedApiTask : DefaultTask() {
                 Regex("""(val \w+:\s*kotlin\.Boolean)(,|\n)""") to { m: MatchResult ->
                     "${m.groupValues[1]} = false${m.groupValues[2]}"
                 },
+                Regex("""(val \w+:\s*kotlin\.Long)(,|\n)""") to { m: MatchResult ->
+                    "${m.groupValues[1]} = 0L${m.groupValues[2]}"
+                },
                 Regex("""(val \w+:\s*kotlin\.Int)(,|\n)""") to { m: MatchResult ->
                     "${m.groupValues[1]} = 0${m.groupValues[2]}"
                 },
@@ -154,6 +264,12 @@ abstract class FixGeneratedApiTask : DefaultTask() {
                 },
                 Regex("""(val \w+:\s*kotlin\.String)(,|\n)""") to { m: MatchResult ->
                     "${m.groupValues[1]} = \"\"${m.groupValues[2]}"
+                },
+                Regex("""(val \w+:\s*kotlin\.collections\.List<[^>]+>)(,|\n)""") to { m: MatchResult ->
+                    "${m.groupValues[1]} = emptyList()${m.groupValues[2]}"
+                },
+                Regex("""(val \w+:\s*kotlin\.collections\.Map<[^>]+>)(,|\n)""") to { m: MatchResult ->
+                    "${m.groupValues[1]} = emptyMap()${m.groupValues[2]}"
                 },
             )
             for ((pattern, transform) in primitiveDefaults) {

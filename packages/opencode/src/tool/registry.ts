@@ -1,176 +1,308 @@
 import { PlanExitTool } from "./plan"
+import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
-import { BashTool } from "./bash"
+// kilocode_change start
+import { SuggestTool } from "../kilocode/suggestion/tool"
+import { Command } from "@/command"
+// kilocode_change end
+import { ShellTool } from "./shell"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
-import { TaskDescription, TaskTool } from "./task"
+import { TaskTool } from "./task"
+import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
-import { SkillDescription, SkillTool } from "./skill"
-import { Tool } from "./tool"
-import { Config } from "../config/config"
-import { type ToolContext as PluginToolContext, type ToolDefinition } from "@kilocode/plugin" // kilocode_change
+import { SkillTool } from "./skill"
+import * as Tool from "./tool"
+import { Config } from "@/config/config"
+import { type ToolContext as PluginToolContext, type ToolDefinition } from "@kilocode/plugin"
+import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
+import { Schema } from "effect"
 import z from "zod"
 import { Plugin } from "../plugin"
-import { ProviderID, type ModelID } from "../provider/schema"
+import { Provider } from "@/provider/provider"
+
 import { WebSearchTool } from "./websearch"
-import { CodeSearchTool } from "./codesearch"
 import { KiloToolRegistry } from "../kilocode/tool/registry" // kilocode_change
-import { Flag } from "@/flag/flag"
-import { Log } from "@/util/log"
+import { Notebook } from "@/kilocode/notebook/service" // kilocode_change
+import { AgentManager } from "@/kilocode/agent-manager/service" // kilocode_change
+import { RepoOverviewTool } from "@/kilocode/tool/repo-overview" // kilocode_change
+import { RepoCloneTool } from "./repo_clone" // kilocode_change
+import { Flag } from "@opencode-ai/core/flag/flag" // kilocode_change
+import { Auth } from "@/auth" // kilocode_change
+import * as Log from "@opencode-ai/core/util/log"
 import { LspTool } from "./lsp"
-import { Truncate } from "./truncate"
+import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
-import { Glob } from "../util/glob"
+import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Layer, ServiceMap } from "effect"
+import { Effect, Layer, Context, Option } from "effect" // kilocode_change
+import { HttpClient } from "effect/unstable/http" // kilocode_change
+import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Ripgrep } from "@opencode-ai/core/filesystem/ripgrep"
+import { Format } from "../format"
 import { InstanceState } from "@/effect/instance-state"
-import { makeRuntime } from "@/effect/run-service"
-import { Env } from "../env"
+import { EffectBridge } from "@/effect/bridge"
 import { Question } from "../question"
 import { Todo } from "../session/todo"
-import { LSP } from "../lsp"
-import { FileTime } from "../file/time"
+import { LSP } from "@/lsp/lsp"
 import { Instruction } from "../session/instruction"
-import { AppFileSystem } from "../filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
+import { Skill } from "../skill"
+import { Permission } from "@/permission"
+import { SessionStatus } from "@/session/status" // kilocode_change
+import { Reference } from "@/reference/reference"
+import { RepositoryCache } from "@/reference/repository-cache" // kilocode_change
+import { Git } from "@/git" // kilocode_change
+import { BackgroundJob } from "@/background/job"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import * as ToolNetwork from "@/kilocode/sandbox/network" // kilocode_change
+import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
-export namespace ToolRegistry {
-  const log = Log.create({ service: "tool.registry" })
+const log = Log.create({ service: "tool.registry" })
 
-  type TaskDef = Tool.InferDef<typeof TaskTool>
-  type ReadDef = Tool.InferDef<typeof ReadTool>
+export function webSearchEnabled(
+  providerID: ProviderV2.ID,
+  flags = { exa: Flag.KILO_ENABLE_EXA, parallel: Flag.KILO_ENABLE_PARALLEL },
+) {
+  return providerID === ProviderV2.ID.kilo || flags.exa || flags.parallel // kilocode_change
+}
 
-  type State = {
-    custom: Tool.Def[]
-    builtin: Tool.Def[]
-    task: TaskDef
-    read: ReadDef
-  }
+type TaskDef = Tool.InferDef<typeof TaskTool>
+type ReadDef = Tool.InferDef<typeof ReadTool>
 
-  export interface Interface {
-    readonly ids: () => Effect.Effect<string[]>
-    readonly all: () => Effect.Effect<Tool.Def[]>
-    readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
-    readonly tools: (model: {
-      providerID: ProviderID
-      modelID: ModelID
-      agent: Agent.Info
-    }) => Effect.Effect<Tool.Def[]>
-  }
+type State = {
+  custom: Tool.Def[]
+  builtin: Tool.Def[]
+  task: TaskDef
+  read: ReadDef
+}
 
-  export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/ToolRegistry") {}
+export interface Interface {
+  readonly ids: () => Effect.Effect<string[]>
+  readonly all: () => Effect.Effect<Tool.Def[]>
+  readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
+  // kilocode_change start
+  readonly tools: (model: {
+    providerID: ProviderV2.ID
+    modelID: ModelV2.ID
+    family?: string
+    agent: Agent.Info
+  }) => Effect.Effect<Tool.Def[]>
+  // kilocode_change end
+}
 
-  export const layer: Layer.Layer<
-    Service,
-    never,
-    | Config.Service
-    | Plugin.Service
-    | Question.Service
-    | Todo.Service
-    | Agent.Service
-    | LSP.Service
-    | FileTime.Service
-    | Instruction.Service
-    | AppFileSystem.Service
-  > = Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const config = yield* Config.Service
-      const plugin = yield* Plugin.Service
+export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
 
-      const task = yield* TaskTool
-      const read = yield* ReadTool
-      const question = yield* QuestionTool
-      const todo = yield* TodoWriteTool
+export const layer: Layer.Layer<
+  Service,
+  never,
+  | Config.Service
+  | Plugin.Service
+  | Question.Service
+  | Todo.Service
+  | Agent.Service
+  | Skill.Service
+  | Session.Service
+  | SessionStatus.Service // kilocode_change
+  | BackgroundJob.Service
+  | Provider.Service
+  | Reference.Service
+  | LSP.Service
+  | Instruction.Service
+  | FSUtil.Service
+  | EventV2Bridge.Service
+  | HttpClient.HttpClient
+  | ChildProcessSpawner
+  | Ripgrep.Service
+  | Format.Service
+  | Truncate.Service
+  // kilocode_change start
+  | Command.Service
+  // kilocode_change end
+  | RuntimeFlags.Service
+  | Database.Service
+  | Git.Service // kilocode_change
+  | RepositoryCache.Service // kilocode_change
+  | Bus.Service // kilocode_change
+  | Auth.Service // kilocode_change - required by generate-image tool
+> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const config = yield* Config.Service
+    const plugin = yield* Plugin.Service
+    const agents = yield* Agent.Service
+    const skill = yield* Skill.Service
+    const truncate = yield* Truncate.Service
+    const flags = yield* RuntimeFlags.Service
 
-      const state = yield* InstanceState.make<State>(
-        Effect.fn("ToolRegistry.state")(function* (ctx) {
-          const custom: Tool.Def[] = []
+    const invalid = yield* InvalidTool
+    const task = yield* TaskTool
+    const read = yield* ReadTool
+    const question = yield* QuestionTool
+    const todo = yield* TodoWriteTool
+    const lsptool = yield* LspTool
+    const plan = yield* PlanExitTool
+    const webfetch = yield* WebFetchTool
+    const websearch = yield* WebSearchTool
+    const clone = yield* RepoCloneTool // kilocode_change
+    const overview = yield* RepoOverviewTool // kilocode_change
+    const shell = yield* ShellTool
+    const globtool = yield* GlobTool
+    const writetool = yield* WriteTool
+    const edit = yield* EditTool
+    const greptool = yield* GrepTool
+    const patchtool = yield* ApplyPatchTool
+    const skilltool = yield* SkillTool
+    const agent = yield* Agent.Service
+    // kilocode_change start
+    const suggesttool = yield* SuggestTool
+    const manager = Option.getOrUndefined(yield* Effect.serviceOption(AgentManager.Service))
+    const notebook = Option.getOrUndefined(yield* Effect.serviceOption(Notebook.Service))
+    const kiloToolInfos = yield* KiloToolRegistry.infos(manager, notebook).pipe(Effect.provide(MemoryService.layer))
+    // kilocode_change end
 
-          function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
-            return {
-              id,
-              parameters: z.object(def.args),
-              description: def.description,
-              execute: async (args, toolCtx) => {
+    const state = yield* InstanceState.make<State>(
+      Effect.fn("ToolRegistry.state")(function* (ctx) {
+        const custom: Tool.Def[] = []
+
+        function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
+          // Plugin tools still expose Zod args publicly; keep that compatibility
+          // boxed at the registry boundary and give the LLM the original JSON Schema.
+          // Normalize missing args to `{}` once — pre-1.14.49 the code was
+          // `z.object(def.args)` and Zod silently tolerated undefined (#27451, #27630).
+          const args = def.args ?? {}
+          const entries = Object.entries(args)
+          const allZod = entries.every((entry) => isZodType(entry[1]))
+          const zodParams = allZod ? z.object(args) : undefined
+          const jsonSchema = zodParams ? zodJsonSchema(zodParams) : legacyJsonSchema(entries)
+          const parameters = zodParams
+            ? Schema.declare<unknown>((u): u is unknown => zodParams.safeParse(u).success)
+            : Schema.Unknown
+          return {
+            id,
+            parameters,
+            jsonSchema,
+            description: def.description,
+            execute: (args, toolCtx) =>
+              Effect.gen(function* () {
+                // Bridge the host's Effect-based `ask` into a Promise-returning
+                // function for the plugin to make sure context persists
+                const bridge = yield* EffectBridge.make()
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
+                  ask: (req) => bridge.promise(toolCtx.ask(req)),
                   directory: ctx.directory,
                   worktree: ctx.worktree,
                 }
-                const result = await def.execute(args as any, pluginCtx)
-                const out = await Truncate.output(result, {}, await Agent.get(toolCtx.agent))
+                const result = yield* Effect.promise(() => def.execute(args as any, pluginCtx))
+                const output = typeof result === "string" ? result : result.output
+                const metadata = typeof result === "string" ? {} : (result.metadata ?? {})
+                const attachments = typeof result === "string" ? undefined : result.attachments
+                const info = yield* agent.get(toolCtx.agent)
+                const out = yield* truncate.output(output, {}, info)
                 return {
-                  title: "",
-                  output: out.truncated ? out.content : result,
+                  title: typeof result === "string" ? "" : (result.title ?? ""),
+                  output: out.truncated ? out.content : output,
+                  attachments,
                   metadata: {
+                    ...metadata,
                     truncated: out.truncated,
-                    outputPath: out.truncated ? out.outputPath : undefined,
+                    ...(out.truncated && { outputPath: out.outputPath }),
                   },
                 }
-              },
-            }
+              }).pipe(
+                Effect.withSpan("Tool.execute", {
+                  attributes: {
+                    "tool.name": id,
+                    "session.id": toolCtx.sessionID,
+                    "message.id": toolCtx.messageID,
+                    ...(toolCtx.callID ? { "tool.call_id": toolCtx.callID } : {}),
+                  },
+                }),
+              ),
           }
+        }
 
-          const dirs = yield* config.directories()
-          const matches = dirs.flatMap((dir) =>
-            Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
-          )
-          if (matches.length) yield* config.waitForDependencies()
-          for (const match of matches) {
-            const namespace = path.basename(match, path.extname(match))
-            const mod = yield* Effect.promise(
-              () => import(process.platform === "win32" ? match : pathToFileURL(match).href),
-            )
-            for (const [id, def] of Object.entries<ToolDefinition>(mod)) {
-              custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
-            }
+        const dirs = yield* config.directories()
+        const matches = dirs.flatMap((dir) =>
+          Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
+        )
+        if (matches.length) yield* config.waitForDependencies()
+        for (const match of matches) {
+          const namespace = path.basename(match, path.extname(match))
+          // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
+          // Import it as `file://` so Node on Windows accepts the dynamic import.
+          const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
+          for (const [id, def] of Object.entries(mod)) {
+            if (!isPluginTool(def)) continue
+            custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
           }
+        }
 
-          const plugins = yield* plugin.list()
-          for (const p of plugins) {
-            for (const [id, def] of Object.entries(p.tool ?? {})) {
-              custom.push(fromPlugin(id, def))
-            }
+        const plugins = yield* plugin.list()
+        for (const p of plugins) {
+          for (const [id, def] of Object.entries(p.tool ?? {})) {
+            custom.push(fromPlugin(id, def))
           }
+        }
 
-          const cfg = yield* config.get()
-          const questionEnabled = KiloToolRegistry.question() // kilocode_change
+        // kilocode_change start
+        const cfg = yield* config.get()
+        const global = yield* config.getGlobal()
+        const indexing = KiloToolRegistry.indexing(cfg, global)
+        // kilocode_change end
+        const questionEnabled = ["app", "cli", "desktop", "vscode"].includes(flags.client) || flags.enableQuestionTool // kilocode_change: add vscode client
 
-          const tool = yield* Effect.all({
-            invalid: Tool.init(InvalidTool),
-            bash: Tool.init(BashTool),
-            read: Tool.init(read),
-            glob: Tool.init(GlobTool),
-            grep: Tool.init(GrepTool),
-            edit: Tool.init(EditTool),
-            write: Tool.init(WriteTool),
-            task: Tool.init(task),
-            fetch: Tool.init(WebFetchTool),
-            todo: Tool.init(todo),
-            search: Tool.init(WebSearchTool),
-            code: Tool.init(CodeSearchTool),
-            skill: Tool.init(SkillTool),
-            patch: Tool.init(ApplyPatchTool),
-            question: Tool.init(question),
-            lsp: Tool.init(LspTool),
-            plan: Tool.init(PlanExitTool),
-          })
+        const tool = yield* Effect.all({
+          invalid: Tool.init(invalid),
+          shell: Tool.init(shell),
+          read: Tool.init(read),
+          glob: Tool.init(globtool),
+          grep: Tool.init(greptool),
+          edit: Tool.init(edit),
+          write: Tool.init(writetool),
+          task: Tool.init(task),
+          fetch: Tool.init(webfetch),
+          todo: Tool.init(todo),
+          search: Tool.init(websearch),
+          clone: Tool.init(clone), // kilocode_change
+          overview: Tool.init(overview), // kilocode_change
+          skill: Tool.init(skilltool),
+          patch: Tool.init(patchtool),
+          question: Tool.init(question),
+          lsp: Tool.init(lsptool),
+          plan: Tool.init(plan),
+          suggest: Tool.init(suggesttool), // kilocode_change
+        })
 
-          const kilo = yield* KiloToolRegistry.build() // kilocode_change
+        // kilocode_change start
+        const kilo = yield* KiloToolRegistry.build(kiloToolInfos, {
+          agent: agents,
+          truncate,
+          indexing: indexing ?? false,
+        })
+        // kilocode_change end
 
-          return {
-            custom,
-            builtin: [
+        return {
+          custom,
+          // kilocode_change start
+          builtin: KiloToolRegistry.describe(
+            [
               tool.invalid,
               ...(questionEnabled ? [tool.question] : []),
-              tool.bash,
+              tool.shell,
               tool.read,
               tool.glob,
               tool.grep,
@@ -180,106 +312,251 @@ export namespace ToolRegistry {
               tool.fetch,
               tool.todo,
               tool.search,
-              tool.code,
+              ...(flags.experimentalScout ? [tool.clone, tool.overview] : []), // kilocode_change
               tool.skill,
               tool.patch,
-              ...(Flag.KILO_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []), // kilocode_change
-              ...(KiloToolRegistry.plan() ? [tool.plan] : []), // kilocode_change
-              ...KiloToolRegistry.extra(kilo, cfg), // kilocode_change
+              tool.plan,
+              ...(["cli", "vscode"].includes(flags.client) ? [tool.suggest] : []),
+              ...KiloToolRegistry.extra(kilo, cfg),
+              ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ],
-            task: tool.task,
-            read: tool.read,
-          }
-        }),
+            kilo,
+          ),
+          // kilocode_change end
+          task: tool.task,
+          read: tool.read,
+        }
+      }),
+    )
+
+    const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
+      const s = yield* InstanceState.get(state)
+      return [...s.builtin.map(ToolNetwork.builtin), ...s.custom] as Tool.Def[] // kilocode_change
+    })
+
+    const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
+      return (yield* all()).map((tool) => tool.id)
+    })
+
+    const describeSkill = Effect.fn("ToolRegistry.describeSkill")(function* (agent: Agent.Info) {
+      const list = yield* skill.available(agent)
+      if (list.length === 0) return "No skills are currently available."
+      return [
+        "Load a specialized skill that provides domain-specific instructions and workflows.",
+        "",
+        "When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.",
+        "",
+        "The skill will inject detailed instructions, workflows, and access to bundled resources (scripts, references, templates) into the conversation context.",
+        "",
+        'Tool output includes a `<skill_content name="...">` block with the loaded content.',
+        "",
+        "The following skills provide specialized sets of instructions for particular tasks",
+        "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
+        "",
+        Skill.fmt(list, { verbose: false }),
+      ].join("\n")
+    })
+
+    const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (agent: Agent.Info) {
+      const items = (yield* agents.list()).filter((item) => item.mode !== "primary")
+      const filtered = items.filter(
+        (item) => Permission.evaluate("task", item.name, agent.permission).action !== "deny",
       )
-
-      const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
-        const s = yield* InstanceState.get(state)
-        return [...s.builtin, ...s.custom] as Tool.Def[]
-      })
-
-      const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
-        return (yield* all()).map((tool) => tool.id)
-      })
-
-      const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
-        const filtered = (yield* all()).filter((tool) => {
-          if (tool.id === CodeSearchTool.id || tool.id === WebSearchTool.id) {
-            return KiloToolRegistry.exa(input.providerID) // kilocode_change
-          }
-
-          const usePatch =
-            KiloToolRegistry.e2e() || // kilocode_change
-            (input.modelID.includes("gpt-") && !input.modelID.includes("oss") && !input.modelID.includes("gpt-4"))
-          if (tool.id === ApplyPatchTool.id) return usePatch
-          if (tool.id === EditTool.id || tool.id === WriteTool.id) return !usePatch
-
-          return true
-        })
-
-        return yield* Effect.forEach(
-          filtered,
-          Effect.fnUntraced(function* (tool: Tool.Def) {
-            using _ = log.time(tool.id)
-            const output = {
-              description: tool.description,
-              parameters: tool.parameters,
-            }
-            yield* plugin.trigger("tool.definition", { toolID: tool.id }, output)
-            return {
-              id: tool.id,
-              description: [
-                output.description,
-                tool.id === TaskTool.id ? yield* TaskDescription(input.agent) : undefined,
-                tool.id === SkillTool.id ? yield* SkillDescription(input.agent) : undefined,
-              ]
-                .filter(Boolean)
-                .join("\n"),
-              parameters: output.parameters,
-              execute: tool.execute,
-              formatValidationError: tool.formatValidationError,
-            }
-          }),
-          { concurrency: "unbounded" },
+      const list = filtered.toSorted((a, b) => a.name.localeCompare(b.name))
+      const description = list
+        .map(
+          (item) =>
+            `- ${item.name}: ${item.description ?? "This subagent should only be called manually by the user."}`,
         )
+        .join("\n")
+      return ["Available agent types and the tools they have access to:", description].join("\n")
+    })
+
+    const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const filtered = (yield* all()).filter((tool) => {
+        if (!KiloToolRegistry.available(tool, input.agent)) return false // kilocode_change
+        if (tool.id === WebSearchTool.id) {
+          return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
+        }
+
+        const usePatch = KiloToolRegistry.usePatch(input) // kilocode_change
+        if (tool.id === ApplyPatchTool.id) return usePatch
+        if (tool.id === EditTool.id) return !usePatch // kilocode_change
+
+        return true
       })
+      const kiloFiltered = yield* KiloToolRegistry.applyVisibility(filtered) // kilocode_change
 
-      const named: Interface["named"] = Effect.fn("ToolRegistry.named")(function* () {
-        const s = yield* InstanceState.get(state)
-        return { task: s.task, read: s.read }
-      })
+      return yield* Effect.forEach(
+        kiloFiltered, // kilocode_change
+        Effect.fnUntraced(function* (tool: Tool.Def) {
+          using _ = log.time(tool.id)
+          const output = {
+            description: tool.description,
+            parameters: tool.parameters,
+            jsonSchema: tool.jsonSchema,
+          }
+          yield* plugin.trigger("tool.definition", { toolID: tool.id }, output)
+          const jsonSchema =
+            output.parameters === tool.parameters || output.jsonSchema !== tool.jsonSchema
+              ? output.jsonSchema
+              : undefined
+          // kilocode_change start
+          const result = {
+            id: tool.id,
+            description: [
+              output.description,
+              tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
+              tool.id === SkillTool.id ? yield* describeSkill(input.agent) : undefined,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            parameters: output.parameters,
+            jsonSchema,
+            execute: tool.execute,
+            formatValidationError: tool.formatValidationError,
+          }
+          return ToolNetwork.isBuiltin(tool) ? ToolNetwork.builtin(result) : result
+          // kilocode_change end
+        }),
+        { concurrency: "unbounded" },
+      )
+    })
 
-      return Service.of({ ids, all, named, tools })
-    }),
-  )
+    const named: Interface["named"] = Effect.fn("ToolRegistry.named")(function* () {
+      const s = yield* InstanceState.get(state)
+      return { task: s.task, read: s.read }
+    })
 
-  export const defaultLayer = Layer.unwrap(
-    Effect.sync(() =>
-      layer.pipe(
+    return Service.of({ ids, all, named, tools })
+  }),
+)
+
+// kilocode_change start - keep Kilo registry requirements type-checked
+export const defaultLayer: Layer.Layer<Service> = Layer.suspend(
+  // kilocode_change end
+  () =>
+    layer
+      .pipe(
         Layer.provide(Config.defaultLayer),
         Layer.provide(Plugin.defaultLayer),
         Layer.provide(Question.defaultLayer),
         Layer.provide(Todo.defaultLayer),
+        Layer.provide(Skill.defaultLayer),
         Layer.provide(Agent.defaultLayer),
+        Layer.provide(Session.defaultLayer),
+        Layer.provide(BackgroundJob.defaultLayer),
+        Layer.provide(Provider.defaultLayer),
+        Layer.provide(Layer.mergeAll(Git.defaultLayer, RepositoryCache.defaultLayer)), // kilocode_change
+        Layer.provide(Reference.defaultLayer),
         Layer.provide(LSP.defaultLayer),
-        Layer.provide(FileTime.defaultLayer),
         Layer.provide(Instruction.defaultLayer),
-        Layer.provide(AppFileSystem.defaultLayer),
+        Layer.provide(FSUtil.defaultLayer),
+        Layer.provide(Bus.layer),
+        Layer.provide(EventV2Bridge.defaultLayer),
+        Layer.provide(ToolNetwork.httpLayer), // kilocode_change
+        Layer.provide(Format.defaultLayer),
+        Layer.provide(CrossSpawnSpawner.defaultLayer),
+        // kilocode_change start
+        Layer.provide(
+          Ripgrep.layer.pipe(
+            Layer.provide(ToolNetwork.httpLayer),
+            Layer.provide(FSUtil.defaultLayer),
+            Layer.provide(CrossSpawnSpawner.defaultLayer),
+          ),
+        ),
+        // kilocode_change end
+      )
+      // kilocode_change start - provide Kilo-owned registry dependencies
+      .pipe(
+        Layer.provide(Command.defaultLayer),
+        Layer.provide(AgentManager.defaultLayer),
+        Layer.provide(Notebook.defaultLayer),
+        Layer.provide(Database.defaultLayer),
+        Layer.provide(RuntimeFlags.defaultLayer),
+        Layer.provide(SessionStatus.defaultLayer),
+        Layer.provide(Truncate.defaultLayer), // kilocode_change - split the pipe to stay within Effect's overload limit
+      )
+      .pipe(
+        Layer.provide(Auth.defaultLayer),
       ),
-    ),
+  // kilocode_change end
+)
+
+function isZodType(value: unknown): value is z.ZodType {
+  return typeof value === "object" && value !== null && "_zod" in value
+}
+
+function isPluginTool(value: unknown): value is ToolDefinition {
+  return typeof value === "object" && value !== null && "args" in value && "description" in value && "execute" in value
+}
+
+function isJsonSchemaDefinition(value: unknown): value is JSONSchema7Definition {
+  return typeof value === "boolean" || (typeof value === "object" && value !== null && !Array.isArray(value))
+}
+
+function legacyJsonSchema(entries: [string, unknown][]): JSONSchema7 {
+  const properties = Object.fromEntries(
+    entries.filter((entry): entry is [string, JSONSchema7Definition] => isJsonSchemaDefinition(entry[1])),
   )
-
-  const { runPromise } = makeRuntime(Service, defaultLayer)
-
-  export async function ids() {
-    return runPromise((svc) => svc.ids())
-  }
-
-  export async function tools(input: {
-    providerID: ProviderID
-    modelID: ModelID
-    agent: Agent.Info
-  }): Promise<(Tool.Def & { id: string })[]> {
-    return runPromise((svc) => svc.tools(input))
+  return {
+    type: "object",
+    properties,
+    required: Object.keys(properties),
   }
 }
+
+function zodJsonSchema(schema: z.ZodType): JSONSchema7 {
+  const result = normalizeZodJsonSchema(z.toJSONSchema(schema, { io: "input", metadata: zodMetadataRegistry(schema) }))
+  if (!isJsonSchemaObject(result)) throw new Error("plugin tool Zod schema produced a non-object JSON Schema")
+  const { $defs, ...rest } = result
+  return (
+    $defs && isJsonSchemaObject($defs) ? { ...rest, definitions: $defs as JSONSchema7["definitions"] } : rest
+  ) as JSONSchema7
+}
+
+function zodMetadataRegistry(schema: z.ZodType) {
+  const registry = z.registry<Record<string, unknown>>()
+  const seen = new WeakSet<object>()
+  const collect = (value: unknown) => {
+    if (typeof value !== "object" || value === null) return
+    if (seen.has(value)) return
+    seen.add(value)
+
+    if (isZodType(value)) {
+      const metadata = typeof value.meta === "function" ? value.meta() : undefined
+      const description = typeof value.description === "string" ? value.description : undefined
+      const merged = {
+        ...(metadata && typeof metadata === "object" ? metadata : {}),
+        ...(description ? { description } : {}),
+      }
+      if (Object.keys(merged).length) registry.add(value, merged)
+      collect(value._zod.def)
+      return
+    }
+
+    for (const item of Object.values(value)) collect(item)
+  }
+  collect(schema)
+  return registry
+}
+
+function normalizeZodJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeZodJsonSchema(item))
+  if (typeof value !== "object" || value === null) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter((entry) =>
+        (entry[0] === "exclusiveMaximum" || entry[0] === "exclusiveMinimum") && typeof entry[1] === "boolean"
+          ? false
+          : true,
+      )
+      .map(([key, item]) => [key, normalizeZodJsonSchema(item)]),
+  )
+}
+
+function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+export * as ToolRegistry from "./registry"

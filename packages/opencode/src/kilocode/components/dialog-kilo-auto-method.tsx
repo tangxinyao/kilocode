@@ -12,7 +12,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { useSync } from "@tui/context/sync"
 import { useToast } from "@tui/ui/toast"
 import { Link } from "@tui/ui/link"
-import { Clipboard } from "@tui/util/clipboard"
+import * as Clipboard from "@tui/util/clipboard"
 import { DialogKiloOrganization } from "./dialog-kilo-organization.js"
 
 // These types are OpenCode-internal and imported at runtime
@@ -87,6 +87,7 @@ export function KiloAutoMethod(props: KiloAutoMethodProps) {
             organizations={profile.organizations!}
             userEmail={profile.email}
             providerID={props.providerID}
+            hasPersonalAccount={profile.hasPersonalAccount !== false}
             useSDK={props.useSDK}
             useTheme={props.useTheme}
             DialogModel={props.DialogModel}

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
-import { Log } from "../../../src/util/log"
+import * as Log from "@opencode-ai/core/util/log"
+import type { TerminalColors } from "@opentui/core"
 
 Log.init({ print: false })
 
-const { DEFAULT_THEMES, allThemes, addTheme, hasTheme, resolveTheme } = await import(
+const { DEFAULT_THEMES, allThemes, addTheme, hasTheme, resolveTheme, terminalMode } = await import(
   "../../../src/cli/cmd/tui/context/theme"
 )
 
@@ -44,11 +45,35 @@ test("hasTheme checks theme presence", () => {
 test("resolveTheme rejects circular color refs", () => {
   const item = structuredClone(DEFAULT_THEMES.opencode)
   item.defs = {
-    ...(item.defs ?? {}),
+    ...item.defs,
     one: "two",
     two: "one",
   }
   item.theme.primary = "one"
 
   expect(() => resolveTheme(item, "dark")).toThrow("Circular color reference")
+})
+
+function terminalColors(defaultBackground: string | null, palette: Array<string | null> = []): TerminalColors {
+  return {
+    palette,
+    defaultForeground: null,
+    defaultBackground,
+    cursorColor: null,
+    mouseForeground: null,
+    mouseBackground: null,
+    tekForeground: null,
+    tekBackground: null,
+    highlightBackground: null,
+    highlightForeground: null,
+  }
+}
+
+test("terminalMode derives mode from refreshed background", () => {
+  expect(terminalMode(terminalColors("#fbf1c7"))).toBe("light")
+  expect(terminalMode(terminalColors("#1a1b26"))).toBe("dark")
+})
+
+test("terminalMode does not derive mode from ANSI slot zero", () => {
+  expect(terminalMode(terminalColors(null, ["#000000"]))).toBeUndefined()
 })

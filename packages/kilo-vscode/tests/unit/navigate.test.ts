@@ -3,7 +3,9 @@ import {
   resolveNavigation,
   validateLocalSession,
   adjacentHint,
-  restoreLocalSessions,
+  canOpenRootSession,
+  filterUnassignedSessions,
+  remoteSessions,
   LOCAL,
 } from "../../webview-ui/agent-manager/navigate"
 
@@ -187,98 +189,136 @@ describe("adjacentHint", () => {
   })
 })
 
-describe("restoreLocalSessions", () => {
-  const identity = (items: { id: string }[], _order: string[]) => items
-  const isPending = (id: string) => id.startsWith("pending-")
-
-  // Simulates applyTabOrder: reorders items to match the order array
-  const reorder = (items: { id: string }[], order: string[]) => {
-    const lookup = new Map(items.map((item) => [item.id, item]))
-    const result: { id: string }[] = []
-    for (const id of order) {
-      const item = lookup.get(id)
-      if (item) {
-        result.push(item)
-        lookup.delete(id)
-      }
-    }
-    for (const item of lookup.values()) result.push(item)
-    return result
-  }
-
-  it("restores local sessions when current list is empty", () => {
-    const sessions = [
-      { id: "s1", worktreeId: null },
-      { id: "s2", worktreeId: null },
-    ]
-    const result = restoreLocalSessions(sessions, [], undefined, isPending, identity)
-    expect(result).toEqual(["s1", "s2"])
+describe("filterUnassignedSessions", () => {
+  const at = (day: number) => `2026-01-${String(day).padStart(2, "0")}T00:00:00.000Z`
+  const info = (id: string, day: number, parentID: string | null = null) => ({
+    id,
+    createdAt: at(day),
+    parentID,
   })
 
-  it("skips worktree-bound sessions", () => {
-    const sessions = [
-      { id: "s1", worktreeId: "wt-1" },
-      { id: "s2", worktreeId: null },
-      { id: "s3", worktreeId: "wt-2" },
-    ]
-    const result = restoreLocalSessions(sessions, [], undefined, isPending, identity)
-    expect(result).toEqual(["s2"])
+  it("filters sparse session updates until ancestry is known", () => {
+    const result = filterUnassignedSessions([{ id: "unknown", createdAt: at(1) }], new Set(), new Set())
+
+    expect(result).toEqual([])
   })
 
-  it("applies tab order on restore", () => {
-    const sessions = [
-      { id: "s1", worktreeId: null },
-      { id: "s2", worktreeId: null },
-      { id: "s3", worktreeId: null },
-    ]
-    const result = restoreLocalSessions(sessions, [], ["s3", "s1", "s2"], isPending, reorder)
-    expect(result).toEqual(["s3", "s1", "s2"])
+  it("keeps root sessions with null parent IDs", () => {
+    const result = filterUnassignedSessions([info("root", 1, null)], new Set(), new Set())
+
+    expect(result.map((s) => s.id)).toEqual(["root"])
   })
 
-  it("does not overwrite existing real sessions", () => {
-    const sessions = [
-      { id: "s1", worktreeId: null },
-      { id: "s2", worktreeId: null },
-    ]
-    // Current already has real sessions — don't replace
-    const result = restoreLocalSessions(sessions, ["s1", "s2"], undefined, isPending, identity)
-    expect(result).toBeUndefined()
+  it("filters child sessions with parent IDs", () => {
+    const result = filterUnassignedSessions(
+      [info("parent", 2), info("child", 3, "parent"), info("orphan", 4, "missing")],
+      new Set(),
+      new Set(),
+    )
+
+    expect(result.map((s) => s.id)).toEqual(["parent"])
   })
 
-  it("does restore when current only has pending tabs", () => {
-    const sessions = [
-      { id: "s1", worktreeId: null },
-      { id: "s2", worktreeId: null },
-    ]
-    const result = restoreLocalSessions(sessions, ["pending-1"], undefined, isPending, identity)
-    expect(result).toEqual(["s1", "s2"])
+  it("filters string parent IDs even when they are empty", () => {
+    const result = filterUnassignedSessions([info("blank", 2, ""), info("root", 1)], new Set(), new Set())
+
+    expect(result.map((s) => s.id)).toEqual(["root"])
   })
 
-  it("returns undefined when no local sessions and no tab order", () => {
-    const sessions = [{ id: "s1", worktreeId: "wt-1" }]
-    const result = restoreLocalSessions(sessions, [], undefined, isPending, identity)
-    expect(result).toBeUndefined()
+  it("filters worktree sessions while keeping other roots", () => {
+    const result = filterUnassignedSessions(
+      [info("root", 1), info("worktree", 3), info("other", 2)],
+      new Set(["worktree"]),
+      new Set(),
+    )
+
+    expect(result.map((s) => s.id)).toEqual(["other", "root"])
   })
 
-  it("applies tab order to existing sessions", () => {
-    const sessions = [{ id: "s1", worktreeId: null }]
-    const result = restoreLocalSessions(sessions, ["s2", "s1"], ["s1", "s2"], isPending, reorder)
-    expect(result).toEqual(["s1", "s2"])
+  it("filters local tab sessions while keeping other roots", () => {
+    const result = filterUnassignedSessions(
+      [info("root", 1), info("local", 3), info("other", 2)],
+      new Set(),
+      new Set(["local"]),
+    )
+
+    expect(result.map((s) => s.id)).toEqual(["other", "root"])
   })
 
-  it("merges disk session missing from stale webview state", () => {
-    const sessions = [
-      { id: "s1", worktreeId: null },
-      { id: "s2", worktreeId: null },
-      { id: "s3", worktreeId: null },
-    ]
-    // webview state is stale: has s1, s2 but not s3 (debounce didn't fire)
-    const result = restoreLocalSessions(sessions, ["s1", "s2"], undefined, isPending, identity)
-    expect(result).toEqual(["s1", "s2", "s3"])
+  it("applies child, worktree, and local filters before sorting", () => {
+    const result = filterUnassignedSessions(
+      [info("old-root", 1), info("child", 6, "old-root"), info("worktree", 5), info("local", 4), info("new-root", 3)],
+      new Set(["worktree"]),
+      new Set(["local"]),
+    )
+
+    expect(result.map((s) => s.id)).toEqual(["new-root", "old-root"])
   })
 
-  it("returns undefined when no disk sessions and no tab order", () => {
-    const result = restoreLocalSessions([], [], undefined, isPending, identity)
-    expect(result).toBeUndefined()
+  it("returns an empty list when every session is filtered", () => {
+    const result = filterUnassignedSessions(
+      [info("child", 3, "root"), info("worktree", 2), info("local", 1)],
+      new Set(["worktree"]),
+      new Set(["local"]),
+    )
+
+    expect(result).toEqual([])
+  })
+
+  it("does not mutate the input order", () => {
+    const sessions = [info("old", 1), info("new", 3), info("mid", 2)]
+
+    filterUnassignedSessions(sessions, new Set(), new Set())
+
+    expect(sessions.map((s) => s.id)).toEqual(["old", "new", "mid"])
+  })
+
+  it("preserves session objects and extra fields", () => {
+    const root = { ...info("root", 1), title: "Existing session" }
+    const result = filterUnassignedSessions([root], new Set(), new Set())
+
+    expect(result[0]).toBe(root)
+    expect(result[0]?.title).toBe("Existing session")
+  })
+
+  it("keeps a parent root when its child is filtered", () => {
+    const result = filterUnassignedSessions([info("root", 1), info("child", 2, "root")], new Set(), new Set())
+
+    expect(result.map((s) => s.id)).toEqual(["root"])
+  })
+})
+
+describe("canOpenRootSession", () => {
+  const sessions = [{ id: "root", parentID: null }, { id: "child", parentID: "root" }, { id: "sparse" }]
+
+  it("only opens sessions with known root ancestry", () => {
+    expect(canOpenRootSession("root", sessions)).toBe(true)
+    expect(canOpenRootSession("child", sessions)).toBe(false)
+    expect(canOpenRootSession("sparse", sessions)).toBe(false)
+    expect(canOpenRootSession("missing", sessions)).toBe(false)
+  })
+})
+
+describe("remoteSessions", () => {
+  const pending = (id: string) => id.startsWith("pending:")
+
+  it("returns every real tab without collapsing sessions in the same worktree", () => {
+    const result = remoteSessions(
+      ["local-1", "pending:1", "shared"],
+      [
+        { id: "shared", worktreeId: "wt-1" },
+        { id: "worktree-1", worktreeId: "wt-1" },
+        { id: "worktree-2", worktreeId: "wt-1" },
+        { id: "worktree-3", worktreeId: "wt-2" },
+        { id: "closed-local", worktreeId: null },
+      ],
+      pending,
+    )
+
+    expect(result).toEqual(["local-1", "shared", "worktree-1", "worktree-2", "worktree-3"])
+  })
+
+  it("returns an empty list without open sessions", () => {
+    expect(remoteSessions([], [], pending)).toEqual([])
   })
 })

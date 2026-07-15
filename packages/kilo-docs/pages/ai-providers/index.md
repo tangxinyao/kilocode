@@ -22,6 +22,10 @@ Major AI companies offering powerful models via API:
 - **[Anthropic](/docs/ai-providers/anthropic)** - Claude models (Claude 4, Claude 3.5 Sonnet, etc.)
 - **[OpenAI](/docs/ai-providers/openai)** - GPT-4, GPT-4o, o1, and more
 - **[Google Gemini](/docs/ai-providers/gemini)** - Gemini Pro, Gemini Ultra
+- **[Google Vertex AI](/docs/ai-providers/vertex)** - Google Cloud-hosted Gemini and partner models
+- **[AWS Bedrock](/docs/ai-providers/bedrock)** - AWS-hosted foundation models
+- **[Alibaba Cloud](/docs/ai-providers/alibaba)** - DashScope and Qwen models through Model Studio
+- **[Cloudflare](/docs/ai-providers/cloudflare)** - Workers AI and Cloudflare AI Gateway
 - **[DeepSeek](/docs/ai-providers/deepseek)** - DeepSeek V3., R1
 - **[Mistral](/docs/ai-providers/mistral)** - Mistral Large, Codestral
 
@@ -29,6 +33,8 @@ Major AI companies offering powerful models via API:
 
 Run models on your own hardware for privacy and offline use:
 
+- **[Atomic Chat](/docs/ai-providers/atomic-chat)** - Local models with TurboQuant inference and auto-discovery in Kilo Code
+- **[Anaconda Desktop](/docs/ai-providers/anaconda-desktop)** - Discover and connect to a local text-generation model server
 - **[Ollama](/docs/ai-providers/ollama)** - Easy local model management
 - **[LM Studio](/docs/ai-providers/lmstudio)** - Desktop app for local models
 - **[OpenAI Compatible](/docs/ai-providers/openai-compatible)** - Any OpenAI-compatible endpoint
@@ -38,17 +44,17 @@ Run models on your own hardware for privacy and offline use:
 Route requests through unified APIs with additional features:
 
 - **[OpenRouter](/docs/ai-providers/openrouter)** - Access multiple providers through one API
-- **[Glama](/docs/ai-providers/glama)** - Enterprise AI gateway
 - **[Requesty](/docs/ai-providers/requesty)** - Smart routing and fallbacks
+- **[Cloudflare AI Gateway](/docs/ai-providers/cloudflare)** - Route providers through your Cloudflare account
 
 ## Choosing a Provider
 
-| Priority        | Recommended Provider                                |
-| --------------- | --------------------------------------------------- |
-| Ease of use     | [Kilo Code (built-in)](/docs/ai-providers/kilocode) |
-| Best value      | Zhipu AI or Mistral                                 |
-| Privacy/Offline | Ollama or LM Studio                                 |
-| Enterprise      | AWS Bedrock or Google Vertex                        |
+| Priority | Recommended Provider |
+|---|---|
+| Ease of use | [Kilo Code (built-in)](/docs/ai-providers/kilocode) |
+| Best value | Zhipu AI or Mistral |
+| Privacy/Offline | Ollama or LM Studio |
+| Enterprise | AWS Bedrock or Google Vertex |
 
 ## Why Use Multiple Providers?
 
@@ -56,10 +62,6 @@ Route requests through unified APIs with additional features:
 - **Reliability** - Backup options when a provider has outages
 - **Models** - Access exclusive or specialized models
 - **Regional** - Better latency in certain locations
-
-{% callout type="note" %}
-In the **VSCode (Legacy)** version, API keys use VS Code's Secret Storage. In the current **VSCode & CLI** version, keys are set via environment variables or referenced in `kilo.json` config files. See individual provider pages for setup instructions for each platform.
-{% /callout %}
 
 ## Disabling Built-in Providers
 

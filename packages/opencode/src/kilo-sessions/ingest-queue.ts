@@ -48,6 +48,10 @@ export namespace IngestQueue {
         type: "session_close"
         data: { reason: CloseReason }
       }
+    | {
+        type: "session_status"
+        data: { status: "idle" | "busy" | "question" | "permission" | "retry" }
+      }
 
   type Share = {
     ingestPath: string
@@ -123,6 +127,7 @@ export namespace IngestQueue {
       if (item.type === "session_diff") return "session_diff"
       if (item.type === "session_open") return "session_open"
       if (item.type === "session_close") return "session_close"
+      if (item.type === "session_status") return "session_status"
 
       if (item.type === "message") {
         const value = id(item.data)
@@ -203,14 +208,14 @@ export namespace IngestQueue {
           const types = items.map((d) => d.type).join(",")
           options.log.info("ingest flush", {
             sessionId,
-            url: `${client.url}${share.ingestPath}?v=1`,
+            url: `${client.url}${share.ingestPath}?v=2`,
             items: items.length,
             types,
           })
         }
 
         const response = await client
-          .fetch(`${client.url}${share.ingestPath}?v=1`, {
+          .fetch(`${client.url}${share.ingestPath}?v=2`, {
             method: "POST",
             body: JSON.stringify({
               data: items,

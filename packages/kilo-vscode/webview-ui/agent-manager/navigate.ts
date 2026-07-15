@@ -12,6 +12,27 @@ export const LOCAL = "local" as const
 
 type NavResult = { action: "select"; id: string } | { action: typeof LOCAL } | { action: "none" }
 
+type SessionLike = { id: string; parentID?: string | null; createdAt: string }
+
+export function isKnownRootSession(session: Pick<SessionLike, "parentID">): boolean {
+  return session.parentID === null
+}
+
+export function canOpenRootSession(id: string, sessions: Pick<SessionLike, "id" | "parentID">[]): boolean {
+  const session = sessions.find((item) => item.id === id)
+  return !!session && isKnownRootSession(session)
+}
+
+export function filterUnassignedSessions<T extends SessionLike>(
+  sessions: T[],
+  worktree: Set<string>,
+  local: Set<string>,
+): T[] {
+  return [...sessions]
+    .filter((s) => isKnownRootSession(s) && !worktree.has(s.id) && !local.has(s.id))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+}
+
 export function resolveNavigation(direction: "up" | "down", current: string | undefined, ids: string[]): NavResult {
   // Determine current position: -1 = local, 0..N-1 = session index
   if (!current) {
@@ -74,52 +95,17 @@ export function adjacentHint(
   return ""
 }
 
-/**
- * Compute which session IDs should populate the "local" tab on state restore.
- *
- * Managed sessions with `worktreeId === null` are non-worktree sessions that
- * were persisted to agent-manager.json.  On restore we use them as the local
- * tab list, optionally applying a persisted tab order.
- *
- * @param sessions   - All managed sessions from agent-manager.json
- * @param current    - The webview's current localSessionIDs (may contain pending tabs)
- * @param tabOrder   - Persisted tab order for the "local" key, if any
- * @param isPending  - Predicate to identify pending (not-yet-created) tab IDs
- * @param applyOrder - Reorder helper: (items, order) → ordered items
- */
-export function restoreLocalSessions(
-  sessions: { id: string; worktreeId: string | null }[],
-  current: string[],
-  tabOrder: string[] | undefined,
-  isPending: (id: string) => boolean,
-  applyOrder: (items: { id: string }[], order: string[]) => { id: string }[],
-): string[] | undefined {
-  const locals = sessions.filter((s) => !s.worktreeId).map((s) => s.id)
-  const real = current.filter((id) => !isPending(id))
-
-  // First restore: current has no real sessions but disk has some
-  if (locals.length > 0 && real.length === 0) {
-    if (!tabOrder) return locals
-    return applyOrder(
-      locals.map((id) => ({ id })),
-      tabOrder,
-    ).map((item) => item.id)
-  }
-
-  // Merge any disk-persisted sessions missing from current (e.g. vscode.setState
-  // debounce didn't fire before close, but persistSession already wrote to disk)
-  const missing = locals.filter((id) => !current.includes(id))
-  const merged = missing.length > 0 ? [...current, ...missing] : current
-
-  // Apply tab order if present
-  if (tabOrder && merged.length > 0) {
-    return applyOrder(
-      merged.map((id) => ({ id })),
-      tabOrder,
-    ).map((item) => item.id)
-  }
-
-  return missing.length > 0 ? merged : undefined
+export function remoteSessions(
+  local: string[],
+  managed: { id: string; worktreeId: string | null }[],
+  pending: (id: string) => boolean,
+): string[] {
+  return [
+    ...new Set([
+      ...local.filter((id) => !pending(id)),
+      ...managed.filter((session) => session.worktreeId).map((session) => session.id),
+    ]),
+  ]
 }
 
 /**
@@ -133,4 +119,16 @@ export function nextSelectionAfterDelete(deletedId: string, worktreeIds: string[
   if (remaining.length === 0) return LOCAL
   // Prefer the item that was below (same index in the shortened list), else the one above
   return remaining[Math.min(idx, remaining.length - 1)]!
+}
+
+/**
+ * A "focus chat search" request only reaches TaskHeader while ChatView is
+ * the visible main surface — history, an active terminal tab, and the
+ * full-screen review each replace it. Reset to chat first, then dispatch.
+ */
+export function focusChatSearch(reset: { history(v: boolean): void; review(v: boolean): void; terminal(): void }) {
+  reset.history(false)
+  reset.review(false)
+  reset.terminal()
+  window.dispatchEvent(new CustomEvent("focusTranscriptSearch"))
 }

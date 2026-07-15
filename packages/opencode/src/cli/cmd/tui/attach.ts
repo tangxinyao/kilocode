@@ -1,12 +1,11 @@
 import { cmd } from "../cmd"
 import { UI } from "@/cli/ui"
-import { tui } from "./app"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
-import { TuiConfig } from "@/config/tui"
-import { Instance } from "@/project/instance"
-import { existsSync } from "fs"
 import { createKiloClient } from "@kilocode/sdk/v2" // kilocode_change
 import { importCloudSession, validateCloudFork } from "@/kilocode/cloud-session" // kilocode_change
+import { errorMessage } from "@/util/error"
+import { validateSession } from "./validate-session"
+import { ServerAuth } from "@/server/auth"
 
 export const AttachCommand = cmd({
   command: "attach <url>",
@@ -44,8 +43,14 @@ export const AttachCommand = cmd({
         alias: ["p"],
         type: "string",
         describe: "basic auth password (defaults to KILO_SERVER_PASSWORD)",
+      })
+      .option("username", {
+        alias: ["u"],
+        type: "string",
+        describe: "basic auth username (defaults to KILO_SERVER_USERNAME or 'kilo')", // kilocode_change
       }),
   handler: async (args) => {
+    const { TuiConfig } = await import("@/cli/cmd/tui/config/tui")
     const unguard = win32InstallCtrlCGuard()
     try {
       win32DisableProcessedInput()
@@ -75,16 +80,7 @@ export const AttachCommand = cmd({
           return args.dir
         }
       })()
-      const headers = (() => {
-        const password = args.password ?? process.env.KILO_SERVER_PASSWORD
-        if (!password) return undefined
-        const auth = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`
-        return { Authorization: auth }
-      })()
-      const config = await Instance.provide({
-        directory: directory && existsSync(directory) ? directory : process.cwd(),
-        fn: () => TuiConfig.get(),
-      })
+      const headers = ServerAuth.headers({ password: args.password, username: args.username })
       // kilocode_change start - import cloud session before TUI renders
       if (args.cloudFork && args.session) {
         UI.println("Importing session from cloud...")
@@ -103,9 +99,27 @@ export const AttachCommand = cmd({
         args.cloudFork = false
       }
       // kilocode_change end
-      await tui({
+      const config = await TuiConfig.get()
+
+      try {
+        await validateSession({
+          url: args.url,
+          sessionID: args.session,
+          directory,
+          headers,
+        })
+      } catch (error) {
+        UI.error(errorMessage(error))
+        process.exitCode = 1
+        return
+      }
+
+      const { createTuiRenderer, tui } = await import("./app")
+      const renderer = await createTuiRenderer(config)
+      const handle = tui({
         url: args.url,
         config,
+        renderer,
         args: {
           continue: args.continue,
           sessionID: args.session,
@@ -114,6 +128,7 @@ export const AttachCommand = cmd({
         directory,
         headers,
       })
+      await handle.done
     } finally {
       unguard?.()
     }
